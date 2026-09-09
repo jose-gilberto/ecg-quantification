@@ -1,3 +1,6 @@
+"""FROZEN (CBMS'26 reproducibility snapshot). See legacy_cbms26/__init__.py.
+Superseded by ecg_quantification.APPBagGenerator -- do not extend this module.
+"""
 import numpy as np
 
 

@@ -1,4 +1,5 @@
 from ecg_quantification._clinical_bag_generator import ClinicalPrevalenceBagGenerator
+from ecg_quantification._app_bag_generator import APPBagGenerator
 from ecg_quantification._ranges import CLINICAL_RANGES, ZONE_WEIGHTS, RISK_ZONE_LABELS
 from ecg_quantification.datasets import BaseDatasetDownloader, MITBIHDownloader
 from ecg_quantification.preprocessing import ECGPreprocessor
@@ -21,6 +22,7 @@ from ecg_quantification.quantifiers import (
 
 __all__ = [
   'ClinicalPrevalenceBagGenerator',
+  'APPBagGenerator',
   'CLINICAL_RANGES',
   'ZONE_WEIGHTS',
   'RISK_ZONE_LABELS',

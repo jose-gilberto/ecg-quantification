@@ -1,3 +1,6 @@
+"""FROZEN (CBMS'26 reproducibility snapshot). See legacy_cbms26/__init__.py.
+Superseded by ecg_quantification.model_selection.patient_train_test_split -- do not extend this module.
+"""
 import numpy as np
 import os
 from sklearn.model_selection import train_test_split
