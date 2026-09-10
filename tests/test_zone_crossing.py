@@ -10,11 +10,14 @@ from ecg_quantification.metrics._zone_crossing import _find_zone
 CLASSES = np.array(['A', 'L', 'N', 'R', 'V'])  # np.unique-sorted order
 
 
+@pytest.mark.filterwarnings("ignore:'p_pred' does not sum to 1.0")
 def test_docstring_example_matches_documented_value():
   # exact scenario from ZoneCrossingError's own docstring: V crosses
   # exactly one zone boundary (gray -> high), A and L stay put, R is
   # skipped (single band). Locks in the documented behavior as a
-  # regression guard.
+  # regression guard. p_pred deliberately sums to 0.975, not 1.0 -- an
+  # artifact of the source docstring's own example, kept as-is here on
+  # purpose (changing it would no longer "lock in" the documented value).
   zce = ZoneCrossingError(clinical_ranges=CLINICAL_RANGES, classes=CLASSES)
   p_true = np.array([0.03, 0.005, 0.75, 0.05, 0.165])
   p_pred = np.array([0.03, 0.005, 0.80, 0.05, 0.09])
@@ -31,11 +34,14 @@ def test_perfect_prediction_scores_zero():
 
 def test_single_band_labels_are_skipped():
   # 'R' has only one band in CLINICAL_RANGES -- any true/pred pair for
-  # it must never contribute to the score, however far apart the values are
+  # it must never contribute to the score, however far apart the values are.
+  # The remaining mass is parked on 'A' (index 0) purely to keep these
+  # valid probability vectors -- 'A' isn't in `ranges`, so its value is
+  # irrelevant to the score either way.
   ranges = {'R': CLINICAL_RANGES['R']}
   zce = ZoneCrossingError(clinical_ranges=ranges, classes=CLASSES)
-  p_true = np.array([0.0, 0.0, 0.0, 0.01, 0.0])
-  p_pred = np.array([0.0, 0.0, 0.0, 0.99, 0.0])
+  p_true = np.array([0.99, 0.0, 0.0, 0.01, 0.0])
+  p_pred = np.array([0.01, 0.0, 0.0, 0.99, 0.0])
 
   assert zce(p_true, p_pred) == 0.0
 
@@ -61,14 +67,20 @@ def test_returns_zero_when_no_class_has_clinical_ranges():
 
 def test_full_range_miss_costs_the_maximum_for_that_class():
   # V has 3 bands (K=3): true in the lowest band, predicted in the
-  # highest band -> |0 - 2| / (3 - 1) == 1.0 for V alone
+  # highest band -> |0 - 2| / (3 - 1) == 1.0 for V alone. Remaining mass
+  # is parked on 'N' (not in `ranges`, so irrelevant to the score) purely
+  # to keep these valid probability vectors.
   ranges = {'V': CLINICAL_RANGES['V']}
   zce = ZoneCrossingError(clinical_ranges=ranges, classes=CLASSES)
+  n_idx = np.searchsorted(CLASSES, 'N')
+  v_idx = np.searchsorted(CLASSES, 'V')
+
   p_true = np.zeros(5)
   p_pred = np.zeros(5)
-  v_idx = np.searchsorted(CLASSES, 'V')
   p_true[v_idx] = 0.01   # low-risk band: [0.00, 0.05)
-  p_pred[v_idx] = 0.90   # high-risk band: [0.10, 0.40) -- clamped by _find_zone's fallback
+  p_pred[v_idx] = 0.90   # high-risk band: [0.10, 0.40)
+  p_true[n_idx] = 1.0 - p_true[v_idx]
+  p_pred[n_idx] = 1.0 - p_pred[v_idx]
 
   assert zce(p_true, p_pred) == pytest.approx(1.0)
 
