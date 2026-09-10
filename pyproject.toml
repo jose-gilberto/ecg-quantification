@@ -7,7 +7,7 @@ name = "ecg-quantification"
 version = "0.1.0"
 description = "Clinically-relevant prevalence protocols and tools for ECG beat quantification, built on quack."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 authors = [
     { name = "Gilberto Medeiros", email = "medeiros.gilberto.br@gmail.com" }
 ]
@@ -17,13 +17,24 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "quack @ git+https://github.com/jose-gilberto/quack@main",
-    "numpy>=1.24",
-    "scikit-learn>=1.3",
-    "scipy>=1.11",
+    # Pinned to a specific commit (not @main) for experiment reproducibility:
+    # quack's main branch pins very recent scikit-learn/numpy/pandas/scipy
+    # itself, so an unpinned dependency here could silently shift the whole
+    # stack's floor (and Python version requirement) out from under a
+    # published paper's environment. Bump deliberately, not accidentally.
+    "quack @ git+https://github.com/jose-gilberto/quack@49ed3c79e72499ea154aff0115bff61f848720e0",
+    # Floors below mirror quack's own pins (as of the commit above) so pip's
+    # resolver doesn't have to backtrack across dozens of scikit-learn/numpy
+    # releases before discovering the real constraint -- and so a Python
+    # version too old for quack (<3.11, since scikit-learn>=1.8 requires it)
+    # fails fast with a clear "no matching Python" message instead of a
+    # confusing "conflicting dependencies" one.
+    "numpy>=2.5.0",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.17.0",
+    "pandas>=3.0.3",
     "wfdb>=4.1",
     "matplotlib>=3.7",
-    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
