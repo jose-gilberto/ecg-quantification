@@ -11,6 +11,7 @@ import ecg_quantification as pkg
 EXPECTED_PUBLIC_SYMBOLS = {
   'ClinicalPrevalenceBagGenerator',
   'APPBagGenerator',
+  'ExperimentCheckpoint',
   'CLINICAL_RANGES',
   'ZONE_WEIGHTS',
   'RISK_ZONE_LABELS',
