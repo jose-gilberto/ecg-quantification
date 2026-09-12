@@ -4,6 +4,12 @@ needed), preprocesses into fixed-length segments, splits patient-wise
 into train/test with no patient leakage, and persists the resulting
 arrays to disk.
 
+Preprocessing is checkpointed per-record (see --checkpoint-dir): an
+interruption partway through the 48 MIT-BIH records only costs the
+record that was in progress, not a full restart. Downloading is already
+idempotent on its own (MITBIHDownloader skips re-downloading if a
+manifest exists in --data-dir).
+
 Usage
 -----
 python scripts/prepare_splits.py \
@@ -17,6 +23,7 @@ import argparse
 import os
 import numpy as np
 
+from ecg_quantification import ExperimentCheckpoint
 from ecg_quantification.datasets import MITBIHDownloader
 from ecg_quantification.preprocessing import ECGPreprocessor
 from ecg_quantification.model_selection import patient_train_test_split, assert_no_patient_leakage
@@ -48,7 +55,47 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument('--overwrite-download', action='store_true',
                        help="Force re-download even if the dataset already exists in --data-dir.")
 
+  parser.add_argument('--checkpoint-dir', type=str, default=None,
+                       help="Directory to persist per-record preprocessing checkpoints to. "
+                            "Defaults to '<data-dir>/.checkpoint_prepare_splits'.")
+  parser.add_argument('--use-checkpoint', action=argparse.BooleanOptionalAction, default=True,
+                       help="Skip already-preprocessed records on rerun (via --checkpoint-dir). "
+                            "Pass --no-use-checkpoint to always reprocess every record from scratch.")
+
   return parser.parse_args()
+
+
+def process_all_records_with_checkpoint(preprocessor: ECGPreprocessor,
+                                        checkpoint: ExperimentCheckpoint,
+                                        limit: int = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Same contract as `ECGPreprocessor.process_all_records`, but caches
+  every processed record in `checkpoint` (keyed `'record:{name}'`), so a
+  rerun after an interruption only reprocesses records not already
+  cached -- everything else is loaded straight from disk."""
+  all_records = sorted([f.replace('.dat', '') for f in os.listdir(preprocessor.records_dir) if f.endswith('.dat')])
+  if limit:
+    all_records = all_records[:limit]
+
+  X_all, y_all, record_all = [], [], []
+  for rec in all_records:
+    artifact_key = f'record:{rec}'
+    if checkpoint.has_artifact(artifact_key):
+      X, y, record_ids = checkpoint.load_artifact(artifact_key)
+      print(f"{rec}: {len(X)} segments loaded from checkpoint.")
+    else:
+      X, y, record_ids = preprocessor.process_record(rec)
+      checkpoint.save_artifact(artifact_key, (X, y, record_ids))
+
+    X_all.append(X)
+    y_all.append(y)
+    record_all.append(record_ids)
+
+  X_all = np.vstack(X_all)
+  y_all = np.concatenate(y_all)
+  record_all = np.concatenate(record_all)
+
+  print(f"\nTotal: {len(X_all)} extracted segments from {len(all_records)} records.")
+  return X_all, y_all, record_all
 
 
 def main() -> None:
@@ -67,7 +114,24 @@ def main() -> None:
     length_mode=args.length_mode,
     label_mode=args.label_mode,
   )
-  X, y, record_ids = preprocessor.process_all_records(limit=args.limit_records)
+
+  if args.use_checkpoint:
+    checkpoint_dir = args.checkpoint_dir or os.path.join(args.data_dir, '.checkpoint_prepare_splits')
+    checkpoint = ExperimentCheckpoint(checkpoint_dir)
+    # only the parameters that actually change a record's preprocessed
+    # output belong here -- mismatching any of them against a previous
+    # run under the same checkpoint_dir means cached records would be
+    # silently wrong for the new run, so fail loudly instead
+    checkpoint.record_run_config({
+      'label_mode': args.label_mode,
+      'window_size': args.window_size,
+      'normalization': args.normalization,
+      'length_mode': args.length_mode,
+    })
+    X, y, record_ids = process_all_records_with_checkpoint(preprocessor, checkpoint, limit=args.limit_records)
+  else:
+    X, y, record_ids = preprocessor.process_all_records(limit=args.limit_records)
+
   print(f"Preprocessed {X.shape[0]} segments from {len(np.unique(record_ids))} patients.")
 
   labels, counts = np.unique(y, return_counts=True)

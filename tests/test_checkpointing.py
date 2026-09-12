@@ -164,3 +164,47 @@ def test_manifest_is_human_readable_json(checkpoint_dir):
     manifest = json.load(f)
 
   assert "LR-EMQ" in manifest["fitted"]
+
+
+def test_generic_artifact_save_and_load(checkpoint_dir):
+  ckpt = ExperimentCheckpoint(checkpoint_dir)
+
+  assert ckpt.has_artifact("record:100") is False
+
+  ckpt.save_artifact("record:100", {"X": np.zeros((3, 2)), "y": ["N", "V", "N"]})
+
+  assert ckpt.has_artifact("record:100") is True
+  loaded = ckpt.load_artifact("record:100")
+  assert loaded["y"] == ["N", "V", "N"]
+  np.testing.assert_array_equal(loaded["X"], np.zeros((3, 2)))
+
+
+def test_generic_artifact_missing_key_raises(checkpoint_dir):
+  ckpt = ExperimentCheckpoint(checkpoint_dir)
+  with pytest.raises(KeyError, match="record:999"):
+    ckpt.load_artifact("record:999")
+
+
+def test_generic_artifact_survives_a_new_instance_pointed_at_same_dir(checkpoint_dir):
+  first = ExperimentCheckpoint(checkpoint_dir)
+  first.save_artifact("record:101", (1, 2, 3))
+
+  second = ExperimentCheckpoint(checkpoint_dir)
+  assert second.has_artifact("record:101") is True
+  assert second.load_artifact("record:101") == (1, 2, 3)
+
+
+def test_reads_manifest_written_before_artifacts_namespace_existed(checkpoint_dir):
+  # simulates a checkpoint directory created by an older ExperimentCheckpoint
+  # version whose manifest never had an 'artifacts' key at all
+  os.makedirs(checkpoint_dir, exist_ok=True)
+  legacy_manifest = {"fitted": {}, "evaluated": {}}
+  with open(os.path.join(checkpoint_dir, "manifest.json"), "w") as f:
+    import json
+    json.dump(legacy_manifest, f)
+
+  ckpt = ExperimentCheckpoint(checkpoint_dir)  # must not raise KeyError
+
+  assert ckpt.has_artifact("anything") is False
+  ckpt.save_artifact("anything", 42)
+  assert ckpt.load_artifact("anything") == 42

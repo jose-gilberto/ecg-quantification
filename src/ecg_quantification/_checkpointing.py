@@ -148,8 +148,10 @@ class ExperimentCheckpoint:
   def _load_manifest(self) -> dict:
     if os.path.exists(self.manifest_path):
       with open(self.manifest_path) as f:
-        return json.load(f)
-    return {'fitted': {}, 'evaluated': {}}
+        manifest = json.load(f)
+      manifest.setdefault('artifacts', {})
+      return manifest
+    return {'fitted': {}, 'evaluated': {}, 'artifacts': {}}
 
   def _save_manifest(self) -> None:
     tmp_path = self.manifest_path + '.tmp'
@@ -161,6 +163,51 @@ class ExperimentCheckpoint:
   def _key(*parts: Any) -> str:
     raw = '|'.join(map(str, parts))
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
+
+  # ---------- generic artifacts ----------
+  #
+  # Lower-level primitive, independent of the fit/evaluate namespaces
+  # above: for anything a script wants to checkpoint that isn't a
+  # quantifier fit or a bag evaluation -- e.g. `prepare_splits.py`
+  # caching each record's preprocessed segments, so an interruption
+  # partway through 48 records doesn't force reprocessing the ones
+  # already done.
+
+  def has_artifact(self, key: str) -> bool:
+    """Whether a generic artifact was already cached under `key`."""
+    return key in self.manifest['artifacts']
+
+  def save_artifact(self, key: str, obj: Any) -> None:
+    """Persists an arbitrary picklable `obj` under `key` (via
+    `joblib.dump`), and marks it as cached in the manifest. Overwrites
+    any previous artifact stored under the same `key`.
+
+    Parameters
+    ----------
+    key : str
+      Arbitrary identifier for this artifact (e.g. `'record:100'`).
+    obj : Any
+      Any picklable object to persist.
+    """
+    path = os.path.join(self.models_dir, f'{self._key("artifact", key)}.joblib')
+    tmp_path = path + '.tmp'
+    joblib.dump(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+    self.manifest['artifacts'][key] = {'path': path}
+    self._save_manifest()
+
+  def load_artifact(self, key: str) -> Any:
+    """Loads a previously-cached generic artifact by `key`.
+
+    Raises
+    ------
+    KeyError
+      If `key` was never checkpointed (check `has_artifact` first).
+    """
+    if not self.has_artifact(key):
+      raise KeyError(f"No cached artifact found for '{key}'.")
+    return joblib.load(self.manifest['artifacts'][key]['path'])
 
   # ---------- fit stage ----------
 
