@@ -88,6 +88,10 @@ def parse_args() -> argparse.Namespace:
 
   parser.add_argument('--random-state', type=int, default=0)
 
+  parser.add_argument('--include-threshold-family', action=argparse.BooleanOptionalAction, default=False,
+                      help="Also evaluate native-multiclass X/Max/T50/MedianSweep alongside their "
+                          "OvR-wrapped counterparts (ablation: OvR decomposition vs. native generalization).")
+
   return parser.parse_args()
 
 
@@ -95,7 +99,8 @@ def build_registry(classifier_names: list[str],
                    include_feature_space: bool,
                    cv: int,
                    n_jobs: int,
-                   parallel_backend: str) -> dict[str, object]:
+                   parallel_backend: str,
+                   include_threshold_family: bool = False) -> dict[str, object]:
   """Assembles the full quantifier registry to evaluate: every
   classifier x quantifier combination, plus classifier-free feature-space
   quantifiers if requested."""
@@ -105,6 +110,7 @@ def build_registry(classifier_names: list[str],
   for clf_name in classifier_names:
     registry.update(build_all_quantifiers(
       clf_name, classifiers[clf_name], cv=cv, n_jobs=n_jobs, parallel_backend=parallel_backend,
+      include_threshold_family=include_threshold_family,
     ))
 
   if include_feature_space:
@@ -181,6 +187,7 @@ def main() -> None:
   registry = build_registry(
     args.classifiers, args.include_feature_space,
     cv=args.cv, n_jobs=args.n_jobs, parallel_backend=args.parallel_backend,
+    include_threshold_family=args.include_threshold_family
   )
   print(f"{len(registry)} quantifiers registered: {sorted(registry.keys())}")
   if checkpoint.fitted_names:

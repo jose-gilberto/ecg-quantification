@@ -49,7 +49,8 @@ def default_base_classifiers() -> dict[str, Callable]:
 def build_multiclass_quantifiers(classifier_factory: Callable,
                                  cv: int = 10,
                                  n_jobs: int = None,
-                                 parallel_backend: str = "loky") -> dict[str, object]:
+                                 parallel_backend: str = "loky",
+                                 include_threshold_family: bool = False) -> dict[str, object]:
   """Builds every natively multiclass quack quantifier for a given base classifier.
 
   Parameters
@@ -63,6 +64,17 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
     Forwarded to every quantifier's `n_jobs` parameter.
   parallel_backend : str, default = "loky"
     Forwarded to every quantifier's `parallel_backend` parameter.
+  include_threshold_family : bool, default = False
+    If True, also includes the native-multiclass variants of the
+    threshold-selection family (X, Max, T50, MedianSweep), named with a
+    '-native' suffix to stay distinguishable from their OvR-wrapped
+    counterparts already returned by `build_binary_quantifiers_for_ovr`.
+    Verified empirically that these four *do* accept a multiclass `y`
+    directly in quack (unlike ACC/PACC/HDy/DyS/FormanMM/CDE, which raise
+    ValueError for >2 classes) -- despite quack's own docs suggesting
+    this whole family is binary-only. Defaults to False so existing runs
+    aren't silently changed; opt in explicitly for the OvR-vs-native
+    ablation.
 
   Returns
   -------
@@ -71,7 +83,7 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
   """
   common_cv = dict(cv=cv, n_jobs=n_jobs, parallel_backend=parallel_backend)
 
-  return {
+  quantifiers = {
     'CC': CC(classifier=classifier_factory()),
     'PCC': PCC(classifier=classifier_factory()),
     'GAC': GAC(classifier=classifier_factory(), **common_cv),
@@ -79,6 +91,16 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
     'FM': FM(classifier=classifier_factory(), **common_cv),
     'EMQ': EM(classifier=classifier_factory(), **common_cv),
   }
+
+  if include_threshold_family:
+    quantifiers.update({
+      'X-native': X(classifier=classifier_factory(), **common_cv),
+      'Max-native': Max(classifier=classifier_factory(), **common_cv),
+      'T50-native': T50(classifier=classifier_factory(), **common_cv),
+      'MedianSweep-native': MedianSweep(classifier=classifier_factory(), **common_cv),
+    })
+
+  return quantifiers
 
 
 def build_feature_space_quantifiers(n_jobs: int = None,
@@ -152,7 +174,8 @@ def build_all_quantifiers(classifier_name: str,
                           classifier_factory: Callable,
                           cv: int = 10,
                           n_jobs: int = None,
-                          parallel_backend: str = "loky") -> dict[str, object]:
+                          parallel_backend: str = "loky",
+                          include_threshold_family: bool = False) -> dict[str, object]:
   """Builds every quantifier (native multiclass + OvR-wrapped binary)
   for a single base classifier, with names prefixed by the classifier
   (e.g. `'SVM-ACC'`, `'LR-EMQ'`), matching the reporting convention used
@@ -171,6 +194,8 @@ def build_all_quantifiers(classifier_name: str,
     Forwarded to every quantifier's `n_jobs` parameter.
   parallel_backend : str, default = "loky"
     Forwarded to every quantifier's `parallel_backend` parameter.
+  include_threshold_family : bool, default = False
+    Forwarded to `build_multiclass_quantifiers` -- see there.
 
   Returns
   -------
@@ -178,7 +203,8 @@ def build_all_quantifiers(classifier_name: str,
     Maps `'{classifier_name}-{quantifier_name}'` to a fresh, unfitted instance.
   """
   native = build_multiclass_quantifiers(classifier_factory, cv=cv, n_jobs=n_jobs,
-                                        parallel_backend=parallel_backend)
+                                        parallel_backend=parallel_backend,
+                                        include_threshold_family=include_threshold_family)
   ovr = build_binary_quantifiers_for_ovr(classifier_factory, cv=cv, n_jobs=n_jobs,
                                         parallel_backend=parallel_backend)
 
