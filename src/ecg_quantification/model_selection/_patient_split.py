@@ -162,3 +162,105 @@ def assert_no_patient_leakage(ids_train: np.ndarray, ids_test: np.ndarray) -> No
   """
   overlap = set(np.unique(ids_train)) & set(np.unique(ids_test))
   assert not overlap, f"Patient leakage detected: {sorted(overlap)} appear in both train and test."
+
+
+def guaranteed_patient_train_test_split(X: np.ndarray,
+                                        y: np.ndarray,
+                                        record_ids: np.ndarray,
+                                        ensure_labels: Sequence = None,
+                                        test_size: float = 0.3,
+                                        stratify: bool = True,
+                                        random_state: int = 0,
+                                        max_attempts: int = 50):
+  """Like `patient_train_test_split`, but retries with different seeds
+  until every label in `ensure_labels` is present in *both* the
+  resulting train and test splits, or `max_attempts` is exhausted.
+
+  Motivation: a patient-wise split is a group-wise split -- an entire
+  patient's beats land on one side or the other, never both. If a rare
+  label's beats happen to be concentrated in very few distinct patients
+  (as V/A/L/R annotations are in MIT-BIH, unevenly distributed across
+  the 48 records), an unlucky `random_state` can easily put every
+  patient carrying that label entirely into one split, leaving the
+  other with zero instances of it -- silently breaking anything
+  downstream that needs every class present in both splits (a native
+  multiclass quantifier's `.fit()`, every `OneVsRestQuantifier` member,
+  and `ClinicalPrevalenceBagGenerator`, which raises if a
+  `clinical_ranges` label is entirely absent from the bag-generation
+  side's `y`).
+
+  Parameters
+  ----------
+  X, y, record_ids : ndarray
+    Same as `patient_train_test_split`.
+  ensure_labels : Sequence, default = None
+    Labels required to be present in both splits. Defaults to every
+    unique label in `y` (i.e. full coverage). Pass a subset (e.g. just
+    the rare ones) to only guard against those.
+  test_size, stratify : same as `patient_train_test_split`.
+  random_state : int, default = 0
+    Tried first, as-is (so a caller's explicit seed is respected
+    whenever it already works). If it doesn't give full coverage,
+    subsequent candidate seeds are drawn deterministically from a
+    `np.random.default_rng(random_state)`, so the *retry sequence*
+    itself is reproducible even though it may land on a different
+    winning seed than `random_state`.
+  max_attempts : int, default = 50
+    Maximum number of seeds tried (including `random_state` itself)
+    before giving up.
+
+  Returns
+  -------
+  X_train, X_test, y_train, y_test, ids_train, ids_test : ndarray, ...
+    Same as `patient_train_test_split`.
+  winning_random_state : int
+    The seed that actually produced the returned split. Save this
+    alongside the split artifacts -- it's what makes the split
+    reproducible, not the originally-requested `random_state`.
+
+  Raises
+  ------
+  RuntimeError
+    If no split among `max_attempts` tried seeds gives every label in
+    `ensure_labels` full coverage in both splits. This is not always a
+    matter of trying more seeds: if a label's beats come from a single
+    distinct patient, NO group-wise split can ever put that patient's
+    beats on both sides simultaneously, and every attempt will fail
+    identically regardless of `max_attempts`. The error message lists
+    every attempted seed's missing labels so this structural case is
+    distinguishable from "just got unlucky, try more attempts".
+
+  Examples
+  --------
+  >>> from ecg_quantification.model_selection import guaranteed_patient_train_test_split
+  >>> result = guaranteed_patient_train_test_split(X, y, record_ids, test_size=0.3, random_state=0)
+  >>> X_train, X_test, y_train, y_test, ids_train, ids_test, seed = result
+  """
+  y = np.asarray(y)
+  ensure_labels = set(np.unique(y)) if ensure_labels is None else set(ensure_labels)
+
+  rng = np.random.default_rng(random_state)
+  extra_seeds = [int(s) for s in rng.integers(0, 2**31 - 1, size=max(max_attempts - 1, 0))]
+  candidate_seeds = [random_state] + extra_seeds
+
+  attempts_log = []
+  for seed in candidate_seeds:
+    split = patient_train_test_split(X, y, record_ids, test_size=test_size, stratify=stratify, random_state=seed)
+    _, _, y_train, y_test, _, _ = split
+
+    missing = (ensure_labels - set(np.unique(y_train))) | (ensure_labels - set(np.unique(y_test)))
+    attempts_log.append((seed, sorted(missing)))
+
+    if not missing:
+      return split + (seed,)
+
+  attempts_str = "\n".join(f"  seed={s}: missing {m}" for s, m in attempts_log)
+  raise RuntimeError(
+    f"No patient-wise split among {len(candidate_seeds)} attempts had every label in "
+    f"{sorted(ensure_labels)} present in both train and test.\n{attempts_str}\n"
+    "This usually means a rare label's beats are concentrated in too few distinct "
+    "patients for any group-wise split to guarantee representation on both sides. "
+    "Options: (1) adjust --test-size, (2) manually pin specific patient IDs to each "
+    "split instead of a random group split, or (3) drop the offending label from this "
+    "experiment and document it as a limitation."
+  )

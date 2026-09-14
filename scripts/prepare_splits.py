@@ -26,7 +26,11 @@ import numpy as np
 from ecg_quantification import ExperimentCheckpoint
 from ecg_quantification.datasets import MITBIHDownloader
 from ecg_quantification.preprocessing import ECGPreprocessor
-from ecg_quantification.model_selection import patient_train_test_split, assert_no_patient_leakage
+from ecg_quantification.model_selection import (
+  patient_train_test_split,
+  guaranteed_patient_train_test_split,
+  assert_no_patient_leakage,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,6 +65,10 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument('--use-checkpoint', action=argparse.BooleanOptionalAction, default=True,
                        help="Skip already-preprocessed records on rerun (via --checkpoint-dir). "
                             "Pass --no-use-checkpoint to always reprocess every record from scratch.")
+  parser.add_argument('--max-split-attempts', type=int, default=50,
+                       help="Only used when --label-mode=multiclass: number of random-state "
+                            "retries allowed to find a patient split with every label present "
+                            "in both train and test (see guaranteed_patient_train_test_split).")
 
   return parser.parse_args()
 
@@ -140,22 +148,30 @@ def main() -> None:
     print(f"  {label}: {count} ({count / len(y):.2%})")
 
   print(f"\n=== 3/4: Patient-wise train/test split (test_size={args.test_size}) ===")
-  X_train, X_test, y_train, y_test, ids_train, ids_test = patient_train_test_split(
-    X, y, record_ids,
-    test_size=args.test_size,
-    stratify=args.stratify,
-    random_state=args.random_state,
-  )
+  if args.label_mode == 'multiclass':
+    split = guaranteed_patient_train_test_split(
+      X, y, record_ids,
+      test_size=args.test_size,
+      stratify=args.stratify,
+      random_state=args.random_state,
+      max_attempts=args.max_split_attempts,
+    )
+    X_train, X_test, y_train, y_test, ids_train, ids_test, effective_random_state = split
+    if effective_random_state != args.random_state:
+      print(f"Note: --random-state={args.random_state} didn't give every label in both "
+            f"splits; retried and used random_state={effective_random_state} instead. "
+            f"Recorded below as the actual reproducible seed for this split.")
+  else:
+    X_train, X_test, y_train, y_test, ids_train, ids_test = patient_train_test_split(
+      X, y, record_ids,
+      test_size=args.test_size,
+      stratify=args.stratify,
+      random_state=args.random_state,
+    )
+    effective_random_state = args.random_state if args.random_state is not None else -1
+
   assert_no_patient_leakage(ids_train, ids_test)
   print("Leakage check passed: no patient appears in both splits.")
-
-  print(f"Train: {X_train.shape[0]} segments from {len(np.unique(ids_train))} patients")
-  print(f"Test:  {X_test.shape[0]} segments from {len(np.unique(ids_test))} patients")
-
-  for split_name, y_split in (('train', y_train), ('test', y_test)):
-    split_labels, split_counts = np.unique(y_split, return_counts=True)
-    dist = ', '.join(f"{lbl}={cnt / len(y_split):.2%}" for lbl, cnt in zip(split_labels, split_counts))
-    print(f"  {split_name} class distribution: {dist}")
 
   print(f"\n=== 4/4: Saving artifacts to {args.output_dir} ===")
   os.makedirs(args.output_dir, exist_ok=True)
@@ -170,7 +186,7 @@ def main() -> None:
     normalization=args.normalization,
     length_mode=args.length_mode,
     test_size=args.test_size,
-    random_state=args.random_state if args.random_state is not None else -1,
+    random_state=effective_random_state,
   )
   print(f"Saved: {output_path}")
 

@@ -9,6 +9,7 @@ from ecg_quantification.model_selection import (
   patient_train_test_split,
   patient_kfold_split,
   assert_no_patient_leakage,
+  guaranteed_patient_train_test_split,
 )
 from ecg_quantification.metrics import ZoneCrossingError
 from ecg_quantification.quantifiers import (
@@ -44,6 +45,7 @@ __all__ = [
   'patient_train_test_split',
   'patient_kfold_split',
   'assert_no_patient_leakage',
+  'guaranteed_patient_train_test_split',
   # metrics
   'ZoneCrossingError',
   # quantifiers

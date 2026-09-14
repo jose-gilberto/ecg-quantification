@@ -24,6 +24,7 @@ EXPECTED_PUBLIC_SYMBOLS = {
   'patient_train_test_split',
   'patient_kfold_split',
   'assert_no_patient_leakage',
+  'guaranteed_patient_train_test_split',
   'ZoneCrossingError',
   'default_base_classifiers',
   'build_multiclass_quantifiers',
