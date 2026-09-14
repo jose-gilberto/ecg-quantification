@@ -2,6 +2,7 @@ from ecg_quantification._clinical_bag_generator import ClinicalPrevalenceBagGene
 from ecg_quantification._app_bag_generator import APPBagGenerator
 from ecg_quantification._checkpointing import ExperimentCheckpoint
 from ecg_quantification._ranges import CLINICAL_RANGES, ZONE_WEIGHTS, RISK_ZONE_LABELS
+from ecg_quantification._aggregation import aggregate_prevalence_to_binary, aggregate_bag_true_prevalences_to_binary
 from ecg_quantification.datasets import BaseDatasetDownloader, MITBIHDownloader
 from ecg_quantification.preprocessing import ECGPreprocessor, MULTICLASS_SYMBOLS
 from ecg_quantification.visualization import find_variation_window, plot_signal_window
@@ -32,6 +33,9 @@ __all__ = [
   'CLINICAL_RANGES',
   'ZONE_WEIGHTS',
   'RISK_ZONE_LABELS',
+  # aggregation
+  'aggregate_prevalence_to_binary',
+  'aggregate_bag_true_prevalences_to_binary',
   # datasets
   'BaseDatasetDownloader',
   'MITBIHDownloader',

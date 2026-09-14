@@ -32,6 +32,8 @@ EXPECTED_PUBLIC_SYMBOLS = {
   'build_binary_quantifiers_for_ovr',
   'build_all_quantifiers',
   'OneVsRestQuantifier',
+  'aggregate_prevalence_to_binary',
+  'aggregate_bag_true_prevalences_to_binary',
 }
 
 
