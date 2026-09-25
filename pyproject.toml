@@ -43,6 +43,18 @@ test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+# Deep-learning classifier adapters (LITETimeClassifier now; ECGFounder
+# later) pull in heavyweight backends (TensorFlow for aeon's LITETime,
+# likely PyTorch for ECGFounder). Kept optional -- importing
+# ecg_quantification.quantifiers must not force a multi-hundred-MB
+# install on users who only need the sklearn-based quantifiers, and
+# _lite_time.py defers its `aeon`/`tensorflow` import accordingly (see
+# that module's docstring).
+deep = [
+    "aeon>=1.6",
+    "tensorflow-cpu>=2.16; sys_platform != 'darwin'",
+    "tensorflow>=2.16; sys_platform == 'darwin'",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -58,4 +70,11 @@ filterwarnings = [
     # ExperimentCheckpoint's joblib.dump/load), not something our own code
     # can fix. Safe to ignore until joblib ships a fix upstream.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:joblib",
+    # aeon's LITETimeClassifier.load_model() (used by _load_lite_time when
+    # persist=True) reloads a Keras checkpoint saved mid-training, whose
+    # optimizer had already accumulated Adam moment-estimate variables;
+    # the freshly-deserialized optimizer starts without them. This is
+    # expected -- we only ever use loaded models for inference, never to
+    # resume .fit() -- and is entirely inside keras/aeon, not our code.
+    "ignore:Skipping variable loading for optimizer:UserWarning:keras",
 ]

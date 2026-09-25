@@ -20,6 +20,7 @@ from ecg_quantification.quantifiers import (
   build_binary_quantifiers_for_ovr,
   build_all_quantifiers,
   # ECGFounderClassifier,
+  LITETimeClassifier,
   OneVsRestQuantifier,
 )
 
@@ -59,5 +60,6 @@ __all__ = [
   'build_binary_quantifiers_for_ovr',
   'build_all_quantifiers',
   # 'ECGFounderClassifier',
+  'LITETimeClassifier',
   'OneVsRestQuantifier',
 ]

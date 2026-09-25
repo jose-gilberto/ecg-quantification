@@ -1,5 +1,6 @@
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
 # from ecg_quantification.quantifiers._ecg_founder import ECGFounderClassifier
+from ecg_quantification.quantifiers._lite_time import LITETimeClassifier
 from ecg_quantification.quantifiers._registry import (
   default_base_classifiers,
   build_multiclass_quantifiers,
@@ -11,6 +12,7 @@ from ecg_quantification.quantifiers._registry import (
 __all__ = [
   'OneVsRestQuantifier',
   # 'ECGFounderClassifier',
+  'LITETimeClassifier',
   'default_base_classifiers',
   'build_multiclass_quantifiers',
   'build_feature_space_quantifiers',
