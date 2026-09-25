@@ -193,22 +193,18 @@ def main() -> None:
   if checkpoint.fitted_names:
     print(f"Checkpoint found: {len(checkpoint.fitted_names)}/{len(registry)} already fitted, will be skipped.")
 
-  # GAC (BaseCalibratedQuantifier, _get_oof_method() == "predict") writes
-  # its classifier's raw out-of-fold label predictions into a preallocated
-  # array inside quack's fit() -- which breaks on string labels ('N', 'V',
-  # ...) with "could not convert string to float". Verified empirically:
-  # of every quantifier in the registry, only GAC is affected (the other
-  # BaseCalibratedQuantifier subclasses used here -- GPAC, FM, EM -- use
-  # _get_oof_method() == "predict_proba", which is numeric regardless of
-  # y's dtype). Encoding to integer codes fixes GAC and is a no-op change
-  # in behavior for everything else: `all_classes` (sorted, original
-  # strings) stays the single source of truth for column naming and
-  # ZoneCrossingError, and lines up positionally with the encoded codes
-  # by construction (np.searchsorted against the same sorted array both
-  # quantifiers and ClinicalPrevalenceBagGenerator ultimately key off of).
+  # Every quantifier in the registry is fit directly on the original
+  # string labels ('N', 'V', 'A', 'L', 'R') -- no manual encoding needed
+  # here. GAC (the one native multiclass quantifier that would otherwise
+  # break on string labels: quack's BaseCalibratedQuantifier.fit()
+  # allocates its hard-label out-of-fold buffer as a plain float64 array
+  # regardless of y's dtype) already comes out of build_registry() ->
+  # build_all_quantifiers() -> build_multiclass_quantifiers() wrapped in
+  # LabelEncodedQuantifier, which handles the encode/decode internally
+  # and exposes .classes_ as the original string labels. See
+  # ecg_quantification.quantifiers._label_encoded_quantifier's module
+  # docstring for why this lives here rather than being fixed in quack.
   all_classes = np.unique(np.concatenate([y_train, y_test]))
-  print(f"\n=== Encoding {len(all_classes)} class labels for fitting: {all_classes.tolist()} ===")
-  y_train_encoded = np.searchsorted(all_classes, y_train)
 
   print(f"\n=== Fitting all quantifiers on training data ===")
   fitted = {}
@@ -219,7 +215,7 @@ def main() -> None:
       continue
 
     start = time.time()
-    quantifier.fit(X_train, y_train_encoded)
+    quantifier.fit(X_train, y_train)
     elapsed = time.time() - start
     checkpoint.save_fitted(name, quantifier)
     fitted[name] = quantifier

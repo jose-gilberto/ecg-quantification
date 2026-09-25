@@ -11,6 +11,21 @@ Includes every quantifier quack ships, not just the six evaluated in the
 original CBMS'26 paper (CC, ACC, PCC, PACC, EMQ, HDy) — the extension
 also reports HDx, ReadME, ED, DyS, FormanMM, GAC/GPAC/FM, CDE, and the
 threshold-selector family (X, Max, T50, MedianSweep).
+
+String labels ('N', 'V', 'A', 'L', 'R'): `GAC` is wrapped in
+`LabelEncodedQuantifier` below because it is the only natively multiclass
+quantifier here whose `_get_oof_method() == "predict"` (hard-label
+out-of-fold) — `quack.quantifiers.base.BaseCalibratedQuantifier.fit()`
+allocates that OOF buffer as a plain `float64` array regardless of `y`'s
+dtype, so fitting `GAC` directly on string multiclass labels raises
+`ValueError: could not convert string to float`. Every other native
+multiclass quantifier here (`GPAC`, `FM`, `EM`, the threshold family)
+uses `_get_oof_method() == "predict_proba"` (always numeric) and every
+OvR-wrapped binary quantifier below is fit by `OneVsRestQuantifier` on
+`int`-binarized labels (`(y == c).astype(int)`) — neither needs this.
+See `ecg_quantification.quantifiers._label_encoded_quantifier`'s module
+docstring for the full explanation (this is deliberately *not* fixed
+inside `quack` itself).
 """
 from typing import Callable
 from sklearn.linear_model import LogisticRegression
@@ -26,6 +41,7 @@ from quack.quantifiers import (
   ED,
 )
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
+from ecg_quantification.quantifiers._label_encoded_quantifier import LabelEncodedQuantifier
 
 
 def default_base_classifiers() -> dict[str, Callable]:
@@ -86,7 +102,10 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
   quantifiers = {
     'CC': CC(classifier=classifier_factory()),
     'PCC': PCC(classifier=classifier_factory()),
-    'GAC': GAC(classifier=classifier_factory(), **common_cv),
+    # LabelEncodedQuantifier: see this function's docstring / this
+    # module's docstring -- GAC is the one native multiclass quantifier
+    # here that breaks on string labels without it.
+    'GAC': LabelEncodedQuantifier(GAC(classifier=classifier_factory(), **common_cv)),
     'GPAC': GPAC(classifier=classifier_factory(), **common_cv),
     'FM': FM(classifier=classifier_factory(), **common_cv),
     'EMQ': EM(classifier=classifier_factory(), **common_cv),

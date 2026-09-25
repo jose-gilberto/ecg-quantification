@@ -22,6 +22,7 @@ from ecg_quantification.quantifiers import (
   # ECGFounderClassifier,
   LITETimeClassifier,
   OneVsRestQuantifier,
+  LabelEncodedQuantifier,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
   # 'ECGFounderClassifier',
   'LITETimeClassifier',
   'OneVsRestQuantifier',
+  'LabelEncodedQuantifier',
 ]
