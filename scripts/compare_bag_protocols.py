@@ -40,7 +40,7 @@ Usage
 python scripts/compare_bag_protocols.py \
     --splits-path data/processed/splits_multiclass.npz \
     --output-dir results/app_vs_capp \
-    --n-bags 200 \
+    --n-bags 1000 \
     --bag-sizes 100 200 500 \
     --classifiers LR SVM GB RF \
     --random-state 0
@@ -66,6 +66,8 @@ from ecg_quantification import (
   default_base_classifiers,
 )
 
+import warnings
+warnings.filterwarnings('ignore')
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

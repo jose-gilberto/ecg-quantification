@@ -22,7 +22,7 @@ dependencies = [
     # itself, so an unpinned dependency here could silently shift the whole
     # stack's floor (and Python version requirement) out from under a
     # published paper's environment. Bump deliberately, not accidentally.
-    "quack @ git+https://github.com/jose-gilberto/quack@49ed3c79e72499ea154aff0115bff61f848720e0",
+    "quack @ git+https://github.com/jose-gilberto/quack@develop",
     # Floors below mirror quack's own pins (as of the commit above) so pip's
     # resolver doesn't have to backtrack across dozens of scikit-learn/numpy
     # releases before discovering the real constraint -- and so a Python

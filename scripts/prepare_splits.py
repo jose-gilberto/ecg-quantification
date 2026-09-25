@@ -16,7 +16,7 @@ python scripts/prepare_splits.py \
     --data-dir data/mitbih \
     --output-dir data/processed \
     --label-mode multiclass \
-    --test-size 0.3 \
+    --test-size 0.4 \
     --random-state 0
 """
 import argparse
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument('--normalization', type=str, default='zscore', choices=['zscore', 'minmax'])
   parser.add_argument('--length-mode', type=str, default='pad', choices=['pad', 'interpolate'])
 
-  parser.add_argument('--test-size', type=float, default=0.3,
+  parser.add_argument('--test-size', type=float, default=0.4,
                        help="Approximate fraction of patients assigned to the test split.")
   parser.add_argument('--stratify', action=argparse.BooleanOptionalAction, default=True,
                        help="Balance label distribution across the patient-wise split.")
