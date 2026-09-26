@@ -23,6 +23,10 @@ from ecg_quantification.quantifiers import (
   LITETimeClassifier,
   OneVsRestQuantifier,
   LabelEncodedQuantifier,
+  CachedFitClassifier,
+  cached_classifier_factory,
+  clear_fit_cache,
+  fit_cache_size,
 )
 
 __all__ = [
@@ -64,4 +68,8 @@ __all__ = [
   'LITETimeClassifier',
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
+  'CachedFitClassifier',
+  'cached_classifier_factory',
+  'clear_fit_cache',
+  'fit_cache_size',
 ]

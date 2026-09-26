@@ -34,6 +34,10 @@ EXPECTED_PUBLIC_SYMBOLS = {
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
   'LITETimeClassifier',
+  'CachedFitClassifier',
+  'cached_classifier_factory',
+  'clear_fit_cache',
+  'fit_cache_size',
   'aggregate_prevalence_to_binary',
   'aggregate_bag_true_prevalences_to_binary',
 }
