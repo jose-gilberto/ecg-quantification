@@ -33,3 +33,32 @@ source .venv/bin/activate
 pip install -e ".[test]"
 ```
 
+#### Deep-learning classifier adapters (`.[deep]`, e.g. `LITETimeClassifier`)
+
+The `deep` extra (`pip install -e ".[test,deep]"`) additionally installs
+`aeon` + `tensorflow`/`tensorflow-cpu`, needed only for deep-learning
+classifier adapters under `ecg_quantification.quantifiers`
+(`LITETimeClassifier` today; likely `ECGFounderClassifier` later). This
+has a Python **upper** bound the base package does not: as of this
+writing, TensorFlow's newest *stable* release (2.21.0) only ships wheels
+up to Python 3.13 -- Python 3.14+ (only a pre-release/`rc` build declares
+support, not yet suitable for a reproducible experiment environment) will
+fail to resolve with something like:
+
+```
+ERROR: Could not find a version that satisfies the requirement tensorflow-cpu>=2.16 ...
+```
+
+If `python3 --version` reports 3.14 or newer, create a *separate* venv
+pinned to 3.11/3.12/3.13 specifically for `deep`-extra work, rather than
+whatever your system's default/newest Python happens to be:
+
+```bash
+python3.12 -m venv .venv-deep   # any of 3.11 / 3.12 / 3.13; not 3.14+ yet
+source .venv-deep/bin/activate
+pip install -e ".[test,deep]"
+```
+
+This will move forward on its own as TensorFlow ships stable 3.14
+support; no action needed here once that happens.
+
