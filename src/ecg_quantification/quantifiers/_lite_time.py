@@ -37,16 +37,26 @@ specific to how `quack` refits classifiers:
    seam to later wire epoch-level checkpoint/resume into, without
    touching `quack` internals or `LITETimeClassifier` itself.
 
-NOTE on checkpointing (important, do not skip): a *fitted*
-`LITETimeClassifier` carries aeon's `"cant_pickle": True` tag — its fitted
-state holds live Keras/TensorFlow model objects, which `joblib.dump`
-(used by `ExperimentCheckpoint.save_fitted`) cannot serialize reliably.
-Persisting a fitted `LITETimeClassifier` must go through its own
-`save_best_model`/`save_last_model`/`LITETimeClassifier.load_model`
-file-based mechanism instead of `ExperimentCheckpoint`'s generic joblib
-path. This adapter exposes `persist`/`checkpoint_root` so that
-integration can be wired in later without changing this file again;
-wiring it into `ExperimentCheckpoint` itself is a separate task.
+NOTE on checkpointing (item 14 update): a *fitted* `LITETimeClassifier`
+carries aeon's `"cant_pickle": True` tag, which earlier revisions of this
+docstring took to mean `ExperimentCheckpoint.save_fitted`'s
+`joblib.dump` couldn't reliably persist a fitted quantifier built on it.
+Empirically, that turned out to be wrong about *why* it would fail: a
+fitted Keras model's actual weights round-trip through
+`joblib.dump`/`joblib.load` fine (Keras' own `__reduce__` support), only
+producing an expected, already-filtered "Skipping variable loading for
+optimizer" warning (the deserialized optimizer starts without its
+accumulated Adam moment estimates -- irrelevant here, since a checkpoint
+loaded this way is only ever used for inference via `.predict()`, never
+to resume `.fit()`). The actual, sole blocker was this factory function
+itself using a `lambda` for `model_factory` -- unpicklable by reference
+regardless of what it builds -- fixed by using `functools.partial`
+instead (see below). `ExperimentCheckpoint.save_fitted`/`.load_fitted`
+now work for a `LITETimeClassifier`-based quantifier same as any other,
+no special-casing needed. `persist`/`checkpoint_root`/`resume` (item 12)
+remain a distinct, lower-level mechanism -- aeon's own per-epoch
+best/last-model files, for resuming *training* -- from
+`ExperimentCheckpoint`'s coarser fit/evaluate-level units.
 
 NOTE on resume support (`resume=True`, item 12 of the Fase 3 plan): by
 project decision, this does *not* reimplement epoch-level
@@ -127,6 +137,7 @@ install on users who only need the sklearn-based quantifiers. The import
 is deferred to `_load_lite_time`, the first point a `LITETimeClassifier`
 is actually built.
 """
+import functools
 import os
 import tempfile
 import numpy as np
@@ -386,19 +397,31 @@ def LITETimeClassifier(n_classifiers: int = 5,
   >>> quantifier = CC(classifier=classifier)
   >>> quantifier.fit(X_train, y_train)  # doctest: +SKIP
   """
+  # functools.partial, not a lambda closure: a lambda can't be pickled by
+  # reference (joblib/pickle need a module-level name to resolve), which
+  # would silently block ExperimentCheckpoint.save_fitted() (joblib.dump)
+  # for *any* quantifier built on this classifier, fitted or not -- see
+  # this module's docstring, "NOTE on checkpointing", and
+  # docs/quantifier_registry_audit.md's item 14 note for the empirical
+  # check that a *fitted* LITETimeClassifier's Keras weights themselves
+  # round-trip through joblib.dump/load fine (mod an expected, already
+  # filtered "Skipping variable loading for optimizer" warning) -- this
+  # partial was the one actual blocker, not aeon's "cant_pickle" tag.
+  model_factory = functools.partial(
+    _load_lite_time,
+    n_classifiers=n_classifiers,
+    use_litemv=use_litemv,
+    n_epochs=n_epochs,
+    batch_size=batch_size,
+    persist=persist,
+    checkpoint_root=checkpoint_root,
+    resume=resume,
+    random_state=random_state,
+    verbose=verbose,
+    **model_kwargs,
+  )
   return SklearnClassifierWrapper(
-    model_factory=lambda: _load_lite_time(
-      n_classifiers=n_classifiers,
-      use_litemv=use_litemv,
-      n_epochs=n_epochs,
-      batch_size=batch_size,
-      persist=persist,
-      checkpoint_root=checkpoint_root,
-      resume=resume,
-      random_state=random_state,
-      verbose=verbose,
-      **model_kwargs,
-    ),
+    model_factory=model_factory,
     fit_fn=_lite_time_fit,
     predict_fn=_lite_time_predict,
     predict_proba_fn=_lite_time_predict_proba if supports_predict_proba else None,

@@ -97,10 +97,23 @@ Two things matter for this to actually work as intended:
   internally, so their `(X, y)` content hashes are byte-identical to
   each other, not just their row partitions.
 
-Not solved by this: `ExperimentCheckpoint` (Fase 0) still cannot persist
-a *fitted* LITETime-based quantifier at all (aeon's `"cant_pickle": True`
-tag on a fitted `LITETimeClassifier` makes `joblib.dump` unreliable) --
-this is the same gap already disclosed in `_lite_time`'s own module
-docstring, and remains open; `run_multiclass_experiment.py`'s
-checkpointed pipeline is not yet wired to accept LITETime as a
-`--classifiers` choice.
+**Update (item 14)**: the `ExperimentCheckpoint`/pickling gap noted here
+previously ("cannot persist a fitted LITETime-based quantifier at all")
+turned out to be misdiagnosed. Empirically, a fitted Keras model's
+weights round-trip through `joblib.dump`/`joblib.load` fine; the actual
+(and only) blocker was `_lite_time.py`'s `LITETimeClassifier()` factory
+using a `lambda` for `model_factory`, which `pickle`/`joblib` cannot
+serialize by reference regardless of what it builds. Fixed by using
+`functools.partial` instead -- see `_lite_time.py`'s "NOTE on
+checkpointing". `run_multiclass_experiment.py` now accepts `'LITETime'`
+as a `--classifiers` choice (always run with `n_jobs=None` and through
+`cached_classifier_factory`, per item 13), with dedicated
+`--lite-time-n-classifiers`/`--lite-time-n-epochs`/
+`--lite-time-batch-size` flags -- see that script's module docstring for
+a full example command. Verified end-to-end (fit, checkpoint, reload,
+predict, resume-skips-refit) on a small synthetic 5-class problem in
+`tests/test_run_multiclass_experiment_lite_time.py`; running it for real
+requires the `[deep]` extra and the actual MITBIH splits (not available
+in every environment -- e.g. PhysioNet is unreachable from this
+sandbox's network egress, so the real Fase 3 item 14 comparison numbers
+still need to be produced on a machine with both installed).

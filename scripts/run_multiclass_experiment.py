@@ -35,6 +35,17 @@ python scripts/run_multiclass_experiment.py \
     --splits-path data/processed/splits_multiclass.npz \
     --output-dir results/multiclass_capp \
     --n-bags 200 --bag-sizes 100 200 500 --classifiers LR SVM GB RF --random-state 0
+
+# including LITETime (Fase 3, item 14) -- requires the [deep] extra
+# (aeon + tensorflow); always runs with n_jobs=None (see --classifiers'
+# help) and through a fit cache (item 13) regardless of --n-jobs:
+python scripts/run_multiclass_experiment.py \
+    --splits-path data/processed/splits_multiclass.npz \
+    --output-dir results/multiclass_capp \
+    --n-bags 200 --bag-sizes 100 200 500 \
+    --classifiers LR SVM GB RF LITETime \
+    --lite-time-n-classifiers 5 --lite-time-n-epochs 1500 \
+    --random-state 0
 """
 import argparse
 import os
@@ -51,6 +62,8 @@ from ecg_quantification import (
   default_base_classifiers,
   build_all_quantifiers,
   build_feature_space_quantifiers,
+  LITETimeClassifier,
+  cached_classifier_factory,
 )
 from quack.metrics import ae
 
@@ -75,18 +88,37 @@ def parse_args() -> argparse.Namespace:
                        help="Bag sizes to evaluate, mirroring CBMS'26 Table I.")
 
   parser.add_argument('--classifiers', type=str, nargs='+', default=['LR', 'SVM', 'GB', 'RF'],
-                       choices=['LR', 'SVM', 'GB', 'RF'],
-                       help="Base classifiers to evaluate every quantifier with.")
+                       choices=['LR', 'SVM', 'GB', 'RF', 'LITETime'],
+                       help="Base classifiers to evaluate every quantifier with. 'LITETime' "
+                            "(aeon's deep-learning ensemble, requires the [deep] extra) is "
+                            "automatically run with n_jobs=None and through a fit cache "
+                            "(see --lite-time-* flags and item 13's docs) regardless of "
+                            "--n-jobs, since a per-fold process-parallel refit of a deep "
+                            "model is both uncachable across processes and resource-"
+                            "wasteful (see docs/quantifier_registry_audit.md).")
   parser.add_argument('--include-feature-space', action=argparse.BooleanOptionalAction, default=True,
                        help="Also evaluate classifier-free quantifiers (HDx, ReadMe, ED).")
 
   parser.add_argument('--cv', type=int, default=10,
                        help="Cross-validation folds for calibrated quantifiers.")
   parser.add_argument('--n-jobs', type=int, default=None,
-                       help="Parallel jobs forwarded to every quantifier's own n_jobs.")
+                       help="Parallel jobs forwarded to every quantifier's own n_jobs, for "
+                            "every classifier except LITETime (always n_jobs=None -- see "
+                            "--classifiers' help).")
   parser.add_argument('--parallel-backend', type=str, default='loky', choices=['loky', 'threading'])
 
   parser.add_argument('--random-state', type=int, default=0)
+
+  parser.add_argument('--lite-time-n-classifiers', type=int, default=5,
+                       help="Ensemble size for LITETimeClassifier (only used if 'LITETime' "
+                            "is in --classifiers).")
+  parser.add_argument('--lite-time-n-epochs', type=int, default=1500,
+                       help="Training epochs per LITETime ensemble member (only used if "
+                            "'LITETime' is in --classifiers). Aeon's own default (1500) is "
+                            "expensive -- consider lowering for a quick sanity check.")
+  parser.add_argument('--lite-time-batch-size', type=int, default=64,
+                       help="Batch size for LITETimeClassifier (only used if 'LITETime' is "
+                            "in --classifiers).")
 
   parser.add_argument('--include-threshold-family', action=argparse.BooleanOptionalAction, default=False,
                       help="Also evaluate native-multiclass X/Max/T50/MedianSweep alongside their "
@@ -100,18 +132,52 @@ def build_registry(classifier_names: list[str],
                    cv: int,
                    n_jobs: int,
                    parallel_backend: str,
-                   include_threshold_family: bool = False) -> dict[str, object]:
+                   include_threshold_family: bool = False,
+                   lite_time_kwargs: dict = None,
+                   cache_id: str = None) -> dict[str, object]:
   """Assembles the full quantifier registry to evaluate: every
   classifier x quantifier combination, plus classifier-free feature-space
-  quantifiers if requested."""
+  quantifiers if requested.
+
+  Parameters
+  ----------
+  lite_time_kwargs : dict, default = None
+    Forwarded to `LITETimeClassifier(...)` when `'LITETime'` is in
+    `classifier_names` (e.g. `n_classifiers`, `n_epochs`, `batch_size`,
+    `random_state`). Ignored otherwise.
+  cache_id : str, default = None
+    Forwarded to `cached_classifier_factory` for LITETime's fit cache
+    (item 13) -- give every independent run a distinct id (e.g. derived
+    from `--checkpoint-dir`) so unrelated runs sharing this process
+    never share cached fits. Required when `'LITETime'` is requested.
+
+  Notes
+  -----
+  LITETime is always built with `n_jobs=None` regardless of the `n_jobs`
+  argument, and through `cached_classifier_factory` so the ~16
+  quantifier recipes built on it share one fit cache instead of each
+  independently refitting the (expensive) deep model per CV fold/OvR
+  member -- see `docs/quantifier_registry_audit.md`'s item 13 note and
+  `ecg_quantification.quantifiers._cached_classifier`'s module
+  docstring. Every other classifier is built exactly as before, with the
+  caller's own `n_jobs`.
+  """
   classifiers = default_base_classifiers()
   registry = {}
 
   for clf_name in classifier_names:
-    registry.update(build_all_quantifiers(
-      clf_name, classifiers[clf_name], cv=cv, n_jobs=n_jobs, parallel_backend=parallel_backend,
-      include_threshold_family=include_threshold_family,
-    ))
+    if clf_name == 'LITETime':
+      lite_time_factory = lambda: LITETimeClassifier(**(lite_time_kwargs or {}))
+      classifier_factory = cached_classifier_factory(lite_time_factory, cache_id=cache_id)
+      registry.update(build_all_quantifiers(
+        clf_name, classifier_factory, cv=cv, n_jobs=None, parallel_backend=parallel_backend,
+        include_threshold_family=include_threshold_family,
+      ))
+    else:
+      registry.update(build_all_quantifiers(
+        clf_name, classifiers[clf_name], cv=cv, n_jobs=n_jobs, parallel_backend=parallel_backend,
+        include_threshold_family=include_threshold_family,
+      ))
 
   if include_feature_space:
     registry.update(build_feature_space_quantifiers(n_jobs=n_jobs, parallel_backend=parallel_backend))
@@ -174,6 +240,14 @@ def main() -> None:
     'n_bags': args.n_bags,
     'bag_sizes': sorted(args.bag_sizes),
   }
+  if 'LITETime' in args.classifiers:
+    # part of the run config (not just speed/parallelism) -- unlike
+    # n_jobs, these change what actually gets fitted
+    run_config.update({
+      'lite_time_n_classifiers': args.lite_time_n_classifiers,
+      'lite_time_n_epochs': args.lite_time_n_epochs,
+      'lite_time_batch_size': args.lite_time_batch_size,
+    })
   checkpoint.record_run_config(run_config)
 
   print(f"=== Loading splits from {args.splits_path} ===")
@@ -184,10 +258,25 @@ def main() -> None:
         f"from {len(np.unique(ids_test))} patients.")
 
   print(f"\n=== Building quantifier registry ===")
+  if 'LITETime' in args.classifiers and args.n_jobs not in (None, 1):
+    print(f"  NOTE: --n-jobs={args.n_jobs} is ignored for LITETime (always n_jobs=None) -- "
+          f"see --classifiers' help.")
   registry = build_registry(
     args.classifiers, args.include_feature_space,
     cv=args.cv, n_jobs=args.n_jobs, parallel_backend=args.parallel_backend,
-    include_threshold_family=args.include_threshold_family
+    include_threshold_family=args.include_threshold_family,
+    lite_time_kwargs=dict(
+      n_classifiers=args.lite_time_n_classifiers,
+      n_epochs=args.lite_time_n_epochs,
+      batch_size=args.lite_time_batch_size,
+      random_state=args.random_state,
+    ),
+    # one fit-cache scope per checkpoint_dir: reruns resuming the same
+    # checkpoint reasonably reuse the same scope name (harmless either
+    # way, since the cache is in-memory/per-process only -- cross-run
+    # reuse is what ExperimentCheckpoint's fitted-quantifier persistence
+    # already handles).
+    cache_id=checkpoint_dir,
   )
   print(f"{len(registry)} quantifiers registered: {sorted(registry.keys())}")
   if checkpoint.fitted_names:
