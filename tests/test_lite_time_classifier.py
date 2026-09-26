@@ -26,7 +26,9 @@ pytest.importorskip("aeon")
 
 from quack.quantifiers import CC, PACC
 from ecg_quantification.quantifiers import LITETimeClassifier
-from ecg_quantification.quantifiers._lite_time import _load_lite_time
+from ecg_quantification.quantifiers._lite_time import (
+  _load_lite_time, _checkpoint_member_paths, _checkpoint_is_complete,
+)
 
 
 def _make_data(n=40, length=48, n_classes=2, seed=0):
@@ -164,3 +166,112 @@ class TestQuackIntegration:
     for d in build_dirs:
       files = os.listdir(os.path.join(checkpoint_root, d))
       assert len(files) > 0, f"expected a checkpoint file in {d}, found none"
+
+
+class TestResume:
+  """Item 12: resume support via aeon's own minimal native mechanism
+  (`save_best_model` + `LITETimeClassifier.load_model`) -- see this
+  adapter module's "NOTE on resume support" docstring for exactly what
+  is (and is not) resumed. No custom epoch/optimizer/state_dict
+  checkpointing is implemented here, by explicit project decision.
+  """
+
+  def test_resume_ignored_without_persist(self):
+    """resume=True on its own (persist=False, the default) is a no-op --
+    documented as "ignored when persist=False", not an error -- since
+    there is nothing to resume from if checkpoint files are never kept
+    in the first place."""
+    model = _load_lite_time(n_classifiers=1, n_epochs=1, batch_size=8,
+                            persist=False, resume=True, checkpoint_root=None)
+    assert model.save_best_model is False
+
+  def test_resume_uses_stable_directory_not_mkdtemp(self, tmp_path):
+    checkpoint_root = str(tmp_path)
+    model = _load_lite_time(n_classifiers=2, n_epochs=1, batch_size=8,
+                            persist=True, resume=True,
+                            checkpoint_root=checkpoint_root)
+    # file_path is checkpoint_root itself (plus os.sep), not a fresh
+    # tempfile.mkdtemp subdirectory of it.
+    assert model.file_path == checkpoint_root + os.sep
+    assert not _checkpoint_is_complete(model)
+
+  def test_no_checkpoint_yet_trains_normally(self, tmp_path):
+    """With resume=True but an empty checkpoint_root, .fit() must still
+    actually train (the completeness check must not false-positive on
+    an empty/missing directory)."""
+    X, y = _make_data(n=20, length=24, n_classes=2, seed=5)
+    checkpoint_root = str(tmp_path)
+    classifier = LITETimeClassifier(n_classifiers=1, n_epochs=2, batch_size=8,
+                                    random_state=0, persist=True, resume=True,
+                                    checkpoint_root=checkpoint_root)
+    classifier.fit(X, y)
+
+    assert set(classifier.classes_) == {'N', 'V'}
+    preds = classifier.predict(X)
+    assert preds.shape == (20,)
+    # a complete checkpoint now exists for a later resumed run to find.
+    checkpoint_files = [f for f in os.listdir(checkpoint_root)
+                        if f.endswith('.keras')]
+    assert len(checkpoint_files) >= 1
+
+  def test_complete_checkpoint_skips_retraining_and_loads_instead(self, tmp_path, monkeypatch):
+    """The concrete "resume" scenario: fit a small ensemble once with a
+    stable checkpoint_root, then build a brand-new wrapper pointed at the
+    same directory and confirm the second .fit() call never invokes the
+    underlying Keras training call, loading the saved checkpoint instead.
+    """
+    X, y = _make_data(n=20, length=24, n_classes=2, seed=6)
+    checkpoint_root = str(tmp_path)
+
+    first = LITETimeClassifier(n_classifiers=1, n_epochs=2, batch_size=8,
+                               random_state=0, persist=True, resume=True,
+                               checkpoint_root=checkpoint_root)
+    first.fit(X, y)
+    first_preds = first.predict(X)
+
+    import aeon.classification.deep_learning._lite_time as _lite_time_mod
+    calls = {'count': 0}
+    original_individual_fit = _lite_time_mod.IndividualLITEClassifier.fit
+
+    def _counting_fit(self, *args, **kwargs):
+      calls['count'] += 1
+      return original_individual_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(_lite_time_mod.IndividualLITEClassifier, 'fit', _counting_fit)
+
+    second = LITETimeClassifier(n_classifiers=1, n_epochs=2, batch_size=8,
+                                random_state=0, persist=True, resume=True,
+                                checkpoint_root=checkpoint_root)
+    second.fit(X, y)
+
+    assert calls['count'] == 0, (
+      "resume=True should have loaded the complete checkpoint instead of "
+      "retraining (IndividualLITEClassifier.fit was called)"
+    )
+    assert set(second.classes_) == set(first.classes_)
+    second_preds = second.predict(X)
+    assert second_preds.shape == first_preds.shape
+
+  def test_incomplete_checkpoint_falls_back_to_full_retrain(self, tmp_path):
+    """A partial checkpoint (fewer files than n_classifiers) must not be
+    treated as resumable -- the whole ensemble retrains from scratch, per
+    this adapter's disclosed "no partial resume" limitation."""
+    X, y = _make_data(n=20, length=24, n_classes=2, seed=7)
+    checkpoint_root = str(tmp_path)
+
+    # Fit a real 1-member ensemble to seed a checkpoint file, then rename
+    # it so a *2*-member build sees an incomplete (1 of 2) checkpoint.
+    seed_classifier = LITETimeClassifier(n_classifiers=1, n_epochs=1, batch_size=8,
+                                         random_state=0, persist=True, resume=True,
+                                         checkpoint_root=checkpoint_root)
+    seed_classifier.fit(X, y)
+
+    classifier = LITETimeClassifier(n_classifiers=2, n_epochs=1, batch_size=8,
+                                    random_state=0, persist=True, resume=True,
+                                    checkpoint_root=checkpoint_root)
+    # Only best_model0.keras exists; best_model1.keras is missing, so the
+    # 2-member completeness check must fail and a real .fit() must run.
+    classifier.fit(X, y)
+    assert set(classifier.classes_) == {'N', 'V'}
+    preds = classifier.predict(X)
+    assert preds.shape == (20,)

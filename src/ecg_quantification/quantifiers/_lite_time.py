@@ -48,6 +48,53 @@ path. This adapter exposes `persist`/`checkpoint_root` so that
 integration can be wired in later without changing this file again;
 wiring it into `ExperimentCheckpoint` itself is a separate task.
 
+NOTE on resume support (`resume=True`, item 12 of the Fase 3 plan): by
+project decision, this does *not* reimplement epoch-level
+state_dict/optimizer/epoch-counter checkpointing. aeon's own
+`LITETimeClassifier._fit` trains its `n_classifiers` ensemble members in a
+plain sequential Python loop with no `initial_epoch` parameter exposed
+anywhere in its public API — there is no supported way to resume a single
+member mid-training, only to reconstruct an already-fully-trained
+ensemble from disk via the classmethod `LITETimeClassifier.load_model`
+(itself documented as "load pre-trained keras models from disk instead of
+fitting", i.e. an inference-time loader, not a training-resumption one).
+Given that constraint, `resume=True` here implements the minimal, purely
+aeon-native mechanism available: `persist=True` already makes every
+`IndividualLITEClassifier` member write its best-loss checkpoint to
+`{file_path}{best_file_name}{n}.keras` (`n` in `range(n_classifiers)`) via
+Keras' own `ModelCheckpoint(save_best_only=True)` callback. `resume=True`
+additionally (a) points `file_path` at a *stable* directory
+(`checkpoint_root` itself, not a fresh `tempfile.mkdtemp` subdirectory of
+it — see point 1 above) so those files survive a process restart, and (b)
+has `_lite_time_fit` check, before calling `model.fit(...)`, whether every
+expected member checkpoint file already exists in that directory; if so,
+it loads the complete ensemble via `LITETimeClassifier.load_model(...)`
+and mutates `model` in place instead of retraining, otherwise it fits
+normally (which starts accumulating a fresh, complete checkpoint set for
+next time, since `save_best_model=True` is already active whenever
+`persist=True`).
+
+This means the *only* thing "resumed" is skipping a full retrain once
+every ensemble member already finished training in a previous run — there
+is no partial resume. If a run is interrupted partway (e.g. after only 2
+of 5 members finished), the checkpoint directory holds an incomplete set,
+the completeness check fails, and the *whole* ensemble is retrained from
+scratch on the next `.fit()` call (the 2 finished members' checkpoint
+files are simply overwritten as training proceeds again from member 0).
+This is a direct, disclosed consequence of using aeon's own minimal
+native support rather than reimplementing its per-member training loop
+to add true mid-ensemble/mid-epoch resumption.
+
+`resume=True` requires `persist=True` and a `checkpoint_root` that is
+*not* shared concurrently by more than one logical fit unit — the same
+caveat as `persist=True` alone (point 1 above), except here the caller
+(not this adapter) is responsible for supplying a distinct, stable
+directory per independent fit (e.g. one directory per CV fold if fitting
+under parallel cross-validation is combined with `resume=True`), since a
+stable directory can no longer be auto-isolated per `model_factory()`
+call the way `tempfile.mkdtemp` isolates the `persist=True`/`resume=False`
+case.
+
 NOTE on multiclass + hard-label calibrated quantifiers (`ACC`, `GAC`):
 `LITETimeClassifier` handles multiclass string labels ('N', 'V', 'A', 'L',
 'R') natively and directly -- unlike the sklearn base classifiers used
@@ -92,6 +139,7 @@ def _load_lite_time(n_classifiers: int = 5,
                     batch_size: int = 64,
                     persist: bool = False,
                     checkpoint_root: str = None,
+                    resume: bool = False,
                     random_state: int = None,
                     verbose: bool = False,
                     **kwargs):
@@ -125,6 +173,16 @@ def _load_lite_time(n_classifiers: int = 5,
     Directory under which a fresh subdirectory is created for this
     build's checkpoint files. Required when `persist=True`; ignored
     otherwise.
+  resume : bool, default = False
+    When `True` (requires `persist=True`), checkpoint files are written
+    directly to `checkpoint_root` itself instead of a fresh
+    `tempfile.mkdtemp` subdirectory of it, so they survive a process
+    restart and a later build pointed at the same `checkpoint_root` can
+    find them (see the module docstring's "NOTE on resume support").
+    The caller is then responsible for `checkpoint_root` not being
+    shared concurrently by more than one logical fit unit (e.g. give
+    each CV fold its own directory if combining this with parallel CV).
+    Ignored when `persist=False`.
   random_state : int, default = None
     Forwarded as-is.
   verbose : bool, default = False
@@ -166,7 +224,7 @@ def _load_lite_time(n_classifiers: int = 5,
         "module's docstring."
       )
     os.makedirs(checkpoint_root, exist_ok=True)
-    fit_dir = tempfile.mkdtemp(dir=checkpoint_root, prefix="lite_time_")
+    fit_dir = checkpoint_root if resume else tempfile.mkdtemp(dir=checkpoint_root, prefix="lite_time_")
     build_kwargs.update(
       file_path=fit_dir + os.sep,
       save_best_model=True,
@@ -174,6 +232,23 @@ def _load_lite_time(n_classifiers: int = 5,
     )
 
   return _AeonLITETimeClassifier(**build_kwargs)
+
+
+def _checkpoint_member_paths(model) -> list:
+  """Expected `.keras` checkpoint file path per ensemble member for an
+  unfitted `model` built with `persist=True` (matches aeon's own naming:
+  `{file_path}{best_file_name}{n}.keras`, `n` in `range(n_classifiers)` --
+  see `IndividualLITEClassifier._fit`/`LITETimeClassifier._fit`).
+  """
+  return [
+    model.file_path + model.best_file_name + str(n) + ".keras"
+    for n in range(model.n_classifiers)
+  ]
+
+
+def _checkpoint_is_complete(model) -> bool:
+  """Whether every ensemble member's checkpoint file already exists."""
+  return all(os.path.isfile(path) for path in _checkpoint_member_paths(model))
 
 
 def _lite_time_fit(model, X: np.ndarray, y: np.ndarray, **fit_params) -> None:
@@ -194,6 +269,23 @@ def _lite_time_fit(model, X: np.ndarray, y: np.ndarray, **fit_params) -> None:
     Not accepted by `LITETimeClassifier.fit(X, y)`; any non-empty
     `fit_params` raises rather than being silently dropped.
 
+  Notes
+  -----
+  If `model` was built with `persist=True` (so `model.save_best_model` is
+  set and `model.file_path` holds a per-ensemble-member checkpoint file
+  naming convention -- see the module docstring's "NOTE on resume
+  support") and a *complete* checkpoint (one `.keras` file per ensemble
+  member) already exists at `model.file_path`, training is skipped
+  entirely: `model` is mutated in place via aeon's own
+  `LITETimeClassifier.load_model(...)`, matching the `classes_`
+  (`np.unique(y)`, computed the same way aeon's own `_fit_setup` would)
+  that a fresh `.fit()` on this `y` would have produced. This is always
+  safe to check, `persist=True and resume=False` (the parallel-CV-fold
+  case) always builds a fresh, empty `tempfile.mkdtemp` directory per
+  call, so the completeness check below can never spuriously succeed
+  there -- only `resume=True`'s stable directory can hold a leftover
+  checkpoint from an earlier run.
+
   Raises
   ------
   TypeError
@@ -205,6 +297,20 @@ def _lite_time_fit(model, X: np.ndarray, y: np.ndarray, **fit_params) -> None:
       f"{sorted(fit_params)}. Pass model hyperparameters (n_epochs, "
       f"batch_size, ...) to LITETimeClassifier(...) instead."
     )
+
+  if getattr(model, "save_best_model", False) and _checkpoint_is_complete(model):
+    from aeon.classification.deep_learning import LITETimeClassifier as _AeonLITETimeClassifier
+    classes = np.unique(np.asarray(y))
+    loaded = _AeonLITETimeClassifier.load_model(
+      model_path=_checkpoint_member_paths(model), classes=classes,
+    )
+    model.classifiers_ = loaded.classifiers_
+    model.n_classifiers = loaded.n_classifiers
+    model.classes_ = loaded.classes_
+    model.n_classes_ = loaded.n_classes_
+    model.is_fitted = True
+    return
+
   model.fit(np.asarray(X, dtype=float), y)
 
 
@@ -224,6 +330,7 @@ def LITETimeClassifier(n_classifiers: int = 5,
                        batch_size: int = 64,
                        persist: bool = False,
                        checkpoint_root: str = None,
+                       resume: bool = False,
                        random_state: int = None,
                        verbose: bool = False,
                        supports_predict_proba: bool = True,
@@ -242,11 +349,17 @@ def LITETimeClassifier(n_classifiers: int = 5,
   n_classifiers, use_litemv, n_epochs, batch_size, random_state, verbose
     Forwarded to `_load_lite_time` (see its docstring).
   persist : bool, default = False
-    Forwarded to `_load_lite_time`. Leave `False` until epoch-level
-    checkpoint/resume is wired in (see this module's docstring);
-    training runs stay transient in the meantime.
+    Forwarded to `_load_lite_time`. `True` keeps each build's best-loss
+    checkpoint file per ensemble member on disk instead of deleting it
+    after `.fit()`; required for `resume=True` to have anything to load.
   checkpoint_root : str, default = None
     Forwarded to `_load_lite_time`. Required when `persist=True`.
+  resume : bool, default = False
+    Forwarded to `_load_lite_time` (requires `persist=True`). When a
+    complete checkpoint (every ensemble member) already exists at
+    `checkpoint_root` from an earlier run, `.fit()` skips retraining
+    entirely and loads it instead -- see this module's docstring's "NOTE
+    on resume support" for exactly what is (and is not) resumed.
   supports_predict_proba : bool, default = True
     Whether to expose `predict_proba` on the resulting wrapper. Set to
     `False` only if you need quantifiers requiring `predict_proba`
@@ -281,6 +394,7 @@ def LITETimeClassifier(n_classifiers: int = 5,
       batch_size=batch_size,
       persist=persist,
       checkpoint_root=checkpoint_root,
+      resume=resume,
       random_state=random_state,
       verbose=verbose,
       **model_kwargs,
