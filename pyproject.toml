@@ -23,13 +23,26 @@ dependencies = [
     # stack's floor (and Python version requirement) out from under a
     # published paper's environment. Bump deliberately, not accidentally.
     "quack @ git+https://github.com/jose-gilberto/quack@develop",
-    # Floors below mirror quack's own pins (as of the commit above) so pip's
-    # resolver doesn't have to backtrack across dozens of scikit-learn/numpy
-    # releases before discovering the real constraint -- and so a Python
-    # version too old for quack (<3.11, since scikit-learn>=1.8 requires it)
-    # fails fast with a clear "no matching Python" message instead of a
-    # confusing "conflicting dependencies" one.
-    "numpy>=2.5.0",
+    # Floors below so pip's resolver doesn't have to backtrack across
+    # dozens of scikit-learn/numpy releases before discovering the real
+    # constraint -- and so a Python version too old for quack (<3.11,
+    # since scikit-learn>=1.8 requires it) fails fast with a clear "no
+    # matching Python" message instead of a confusing "conflicting
+    # dependencies" one.
+    #
+    # numpy is capped below 2.5.0 (not just floored) because the optional
+    # `deep` extra's aeon==1.6.0 pins numpy<2.5.0,>=2.0.0 -- an
+    # unconstrained-above floor here (numpy>=2.5.0, this project's
+    # earlier setting) makes `pip install -e ".[deep]"` unresolvable
+    # (ResolutionImpossible) even though a plain `pip install -e "."`
+    # looks fine on its own. Kept as a base-package constraint (rather
+    # than only inside the `deep` extra) since pip has no way to loosen
+    # an already-declared dependency's range only for some extras; the
+    # intersection has to hold for every install of this project,
+    # deep-extra or not. scikit-learn/scipy floors already happened to
+    # fall inside aeon's own upper bounds (<1.10.0 and <1.18.0
+    # respectively) and needed no change when this was discovered.
+    "numpy>=2.0.0,<2.5.0",
     "scikit-learn>=1.9.0",
     "scipy>=1.17.0",
     "pandas>=3.0.3",
@@ -68,7 +81,9 @@ filterwarnings = [
     # joblib's numpy_pickle internals set `.shape` on an ndarray, deprecated
     # as of numpy>=2.5; this is entirely inside joblib (triggered by
     # ExperimentCheckpoint's joblib.dump/load), not something our own code
-    # can fix. Safe to ignore until joblib ships a fix upstream.
+    # can fix. Safe to ignore until joblib ships a fix upstream. Dormant
+    # now that numpy is capped below 2.5.0 (see the `numpy` dependency
+    # comment above) -- left in place in case that cap is ever loosened.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:joblib",
     # aeon's LITETimeClassifier.load_model() (used by _load_lite_time when
     # persist=True) reloads a Keras checkpoint saved mid-training, whose
