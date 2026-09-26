@@ -23,36 +23,45 @@ direct OvR-vs-native ablation for these four methods.
 "doesn't raise `ValueError` for >2 classes" -- it does not mean every
 native multiclass quantifier tolerates *string* labels (this project's
 actual `y` dtype: 'N', 'V', 'A', 'L', 'R'). Of the six natively
-multiclass quantifiers, GAC alone breaks on string `y` with
+multiclass quantifiers, GAC alone actually *breaks* on string `y` with
 `ValueError: could not convert string to float`, because
 `quack.quantifiers.base.BaseCalibratedQuantifier.fit()` allocates its
 hard-label out-of-fold buffer (`_get_oof_method() == "predict"`, GAC's
 case) as a plain `float64` array regardless of `y`'s dtype. GPAC, FM, EM
-all use `_get_oof_method() == "predict_proba"` (always numeric) and are
-unaffected; every OvR-wrapped binary quantifier is fit on `int`-binarized
-labels by `OneVsRestQuantifier` regardless. This was found (and is
-deliberately *not* patched in `quack` itself, by project decision) while
-integrating `LITETimeClassifier`; `build_multiclass_quantifiers` wraps
-GAC in `ecg_quantification.quantifiers.LabelEncodedQuantifier` to work
-around it -- see that class's module docstring for the full explanation.
-Any future native multiclass quantifier added to this registry should be
-checked the same way before assuming string labels "just work".
+all use `_get_oof_method() == "predict_proba"` (always numeric) and
+CC/PCC never build an OOF buffer at all, so none of the other five would
+actually break; every OvR-wrapped binary quantifier is fit on
+`int`-binarized labels by `OneVsRestQuantifier` regardless. This was
+found (and is deliberately *not* patched in `quack` itself, by project
+decision) while integrating `LITETimeClassifier`.
+
+`build_multiclass_quantifiers` wraps *all six* native multiclass
+quantifiers (not only GAC) in
+`ecg_quantification.quantifiers.LabelEncodedQuantifier` -- see that
+class's module docstring for the full explanation. Standardizing this
+way (rather than a GAC-only special case) means every one of them fits
+its base classifier on the exact same integer-encoded labels
+internally, which is what lets `CachedFitClassifier` (item 13, below)
+share one fit-cache group across all six instead of splitting GAC off
+into its own. Any future native multiclass quantifier added to this
+registry should be checked the same way (does it actually need the
+wrapper to avoid crashing?) but wrapped regardless, for this reason.
 
 **Note (deep classifiers + `build_all_quantifiers`, item 13)**: naively
 running `build_all_quantifiers(..., cv=10)` with `LITETimeClassifier` as
 the base classifier multiplies into ~596 real ensemble trainings (see
 `ecg_quantification.quantifiers._cached_classifier`'s module docstring
-for the full breakdown: 4 native CV quantifiers x 11 fits, 10 OvR
-quantifiers x 5 classes x 11 fits, plus CC/PCC). This is because
-`quack`'s CV splitting (`StratifiedKFold(shuffle=False)`, deterministic
-given `(X, y, cv)`) and `OneVsRestQuantifier`'s per-class relabeling
-(`y == c`, a pure function of `(y, c)`) mean many quantifiers end up
-independently refitting the base classifier on *exactly* the same
-training subset. `CachedFitClassifier` /
-`cached_classifier_factory(base_factory, cache_id)` memoize `.fit()` by a
-content hash of `(X, y)`, collapsing this to ~77 real trainings (verified
-empirically end-to-end on a small 3-class synthetic problem: 15 real
-fits vs. 104 naive, matching the predicted formula exactly -- see
+for the full breakdown: 6 native CV quantifiers x 11 fits, 10 OvR
+quantifiers x 5 classes x 11 fits). This is because `quack`'s CV
+splitting (`StratifiedKFold(shuffle=False)`, deterministic given
+`(X, y, cv)`) and `OneVsRestQuantifier`'s per-class relabeling (`y == c`,
+a pure function of `(y, c)`) mean many quantifiers end up independently
+refitting the base classifier on *exactly* the same training subset.
+`CachedFitClassifier` / `cached_classifier_factory(base_factory,
+cache_id)` memoize `.fit()` by a content hash of `(X, y)`, collapsing
+this to ~66 real trainings (verified empirically end-to-end on a small
+3-class synthetic problem: 12 real fits vs. 104 naive, matching the
+predicted formula exactly -- see
 `tests/test_cached_classifier_lite_time_integration.py`).
 
 Practical recipe for running `build_all_quantifiers` with LITETime:
@@ -82,12 +91,11 @@ Two things matter for this to actually work as intended:
   caching: TensorFlow already parallelizes internally per `.fit()` call,
   and spawning several worker processes each loading their own
   TensorFlow runtime competes for the same CPU/GPU rather than helping.
-- GAC (wrapped in `LabelEncodedQuantifier`) does *not* join GPAC/FM/EMQ's
-  shared fit group, even though their folds are identical row-for-row:
-  `LabelEncodedQuantifier` int-encodes `y` before delegating, and the
-  cache treats that as a genuine cache miss against the original string
-  `y` (deliberately -- see `_cached_classifier`'s "On not sharing across
-  differently-labeled data"), so it gets its own 11-fit group instead.
+- All six native multiclass quantifiers now join the same shared fit
+  group (see the "string labels" note above): `LabelEncodedQuantifier`
+  standardizes every one of them onto the same integer-encoded `y`
+  internally, so their `(X, y)` content hashes are byte-identical to
+  each other, not just their row partitions.
 
 Not solved by this: `ExperimentCheckpoint` (Fase 0) still cannot persist
 a *fitted* LITETime-based quantifier at all (aeon's `"cant_pickle": True`

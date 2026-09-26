@@ -72,16 +72,17 @@ class TestBuildAllQuantifiersWithLiteTime:
     for name, quantifier in registry.items():
       quantifier.fit(X, y)
 
-    # GPAC/FM/EMQ (string y) share (cv + 1) fits; GAC gets its own
-    # (cv + 1)-fit group since LabelEncodedQuantifier int-encodes y
-    # before delegating (see _cached_classifier's module docstring, "On
-    # not sharing across differently-labeled data"); OvR quantifiers
-    # share (n_classes * (cv + 1)) fits across every one of the 10 OvR
-    # quantifier types; CC/PCC reuse the GPAC/FM/EMQ group's full-data
-    # refit. n_classifiers=1, so each LITETimeClassifier.fit() call
-    # trains exactly 1 IndividualLITEClassifier.
+    # Every native multiclass quantifier (CC, PCC, GAC, GPAC, FM, EMQ) is
+    # now wrapped in LabelEncodedQuantifier (see build_multiclass_
+    # quantifiers's docstring), so they all fit the base classifier on
+    # byte-identical integer-encoded labels and share ONE (cv + 1)-fit
+    # group -- GAC no longer splits off into its own group. OvR
+    # quantifiers share (n_classes * (cv + 1)) fits across every one of
+    # the 10 OvR quantifier types. n_classifiers=1, so each
+    # LITETimeClassifier.fit() call trains exactly 1
+    # IndividualLITEClassifier.
     n_classes = 3
-    expected_max_real_fits = 2 * (cv + 1) + n_classes * (cv + 1)
+    expected_max_real_fits = (cv + 1) + n_classes * (cv + 1)
     assert calls['count'] <= expected_max_real_fits, (
       f"expected at most {expected_max_real_fits} real LITETime trainings "
       f"(collapsed via CachedFitClassifier), got {calls['count']}"

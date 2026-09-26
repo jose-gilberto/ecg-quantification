@@ -11,23 +11,39 @@ this project's multiclass labels are string beat symbols ('N', 'V', 'A',
 buffer raises `ValueError: could not convert string to float`.
 
 `GAC` is the only *natively multiclass* quantifier in this project's
-registry affected (`_get_oof_method() == "predict"`); `GPAC`, `FM`, `EM`
-all use `"predict_proba"`, which is numeric regardless of `y`'s dtype
-(see `docs/quantifier_registry_audit.md`). `ACC` uses `"predict"` too,
-but its own `.fit()` override rejects >2 classes before reaching this
-code path, so it only matters in binary (OvR-member) use, where
-`OneVsRestQuantifier` already sidesteps the whole issue by binarizing
-labels to `int` (`(y == c).astype(int)`) before fitting each member.
+registry that strictly *needs* this to avoid crashing
+(`_get_oof_method() == "predict"`); `GPAC`, `FM`, `EM` all use
+`"predict_proba"`, which is numeric regardless of `y`'s dtype (see
+`docs/quantifier_registry_audit.md`), and `CC`/`PCC` never build an OOF
+buffer at all. `ACC` uses `"predict"` too, but its own `.fit()` override
+rejects >2 classes before reaching this code path, so it only matters in
+binary (OvR-member) use, where `OneVsRestQuantifier` already sidesteps
+the whole issue by binarizing labels to `int` (`(y == c).astype(int)`)
+before fitting each member.
 
-`LabelEncodedQuantifier` closes the one remaining gap -- fitting a
-natively multiclass, hard-label quantifier (`GAC` today; any future
-`quack` quantifier with the same `"predict"`-OOF shape) directly on this
+`LabelEncodedQuantifier` closes this gap -- fitting a natively
+multiclass, hard-label quantifier (`GAC` today; any future `quack`
+quantifier with the same `"predict"`-OOF shape) directly on this
 project's string labels, without a one-vs-rest decomposition -- by
 encoding `y` to small integer codes before handing it to the wrapped
 quantifier, and exposing `.classes_` as the *original* string labels so
 callers never need to track a separate label-order array by hand (unlike
 the inline `np.searchsorted(all_classes, y_train)` this replaces in
 `scripts/run_multiclass_experiment.py`).
+
+`ecg_quantification.quantifiers._registry.build_multiclass_quantifiers`
+wraps *every* native multiclass quantifier in this (`CC`, `PCC`, `GAC`,
+`GPAC`, `FM`, `EMQ`), not only `GAC` -- the other five don't need it to
+avoid crashing, but standardizing on it anyway means every one of them
+fits its base classifier on the exact same integer-encoded labels
+instead of GAC alone being the odd one out. This matters for
+`CachedFitClassifier` (item 13,
+`ecg_quantification.quantifiers._cached_classifier`): its fit-cache is
+keyed by a content hash of the literal `(X, y)` a classifier is fit on,
+so before this change, GAC's integer-encoded `y` and the other five's
+original string `y` were byte-different even when the underlying row
+partition was identical -- a correctness-motivated cache *miss* between
+groups that can now safely share one instead.
 
 This intentionally lives in `ecg_quantification`, not `quack`: the
 project has decided not to patch `quack` for this (see

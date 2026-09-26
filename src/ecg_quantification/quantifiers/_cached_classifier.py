@@ -39,49 +39,44 @@ the *labels themselves* (`StratifiedKFold` internally re-encodes `y` via
 convention `LabelEncodedQuantifier` already mirrors, see that module).
 Concretely:
 
-- GPAC, FM and EMQ (all fit directly on the original string `y`, no
-  wrapper) built with the same `cv` on the same `(X, y)` produce
-  bit-identical `(train_idx, test_idx)` pairs, so their per-fold *and*
-  final-refit training subsets are identical across all three -- 11 fits
-  shared, not 33.
-- GAC does *not* join that group: it is fit through
-  `LabelEncodedQuantifier` (see that module), which encodes `y` to
-  integer codes before delegating, specifically to work around a
-  separate `quack` limitation. `_fingerprint` hashes `y`'s actual bytes
-  (not a partition-only encoding), by design -- see "On not sharing
-  across differently-labeled data" below -- so GAC's int-coded training
-  subsets are a genuine cache miss against GPAC/FM/EMQ's string-labeled
-  ones, even though the row *partition* is identical. GAC gets its own
-  11-fit group instead of joining the other three's.
+- Every native multiclass quantifier
+  (`build_multiclass_quantifiers` wraps all six -- CC, PCC, GAC, GPAC,
+  FM, EMQ -- in `LabelEncodedQuantifier`, standardizing every one of them
+  onto the same integer-encoded `y` internally, precisely so this holds;
+  see that wrapper's and that builder's module docstrings) built with
+  the same `cv` on the same `(X, y)` produces bit-identical
+  `(train_idx, test_idx)` pairs, so their per-fold *and* final-refit
+  training subsets are identical across all six -- 11 fits shared, not
+  44 (or 66, before CC/PCC/GAC were folded into the same group as
+  GPAC/FM/EMQ).
 - Every OvR quantifier's per-class binary relabeling (`y == c).astype(int)`)
   is a pure function of `(y, c)`, independent of which quantifier (ACC
   vs. PACC vs. HDy, ...) is doing the relabeling -- so the same 5 classes
   x 11 fits are shared across all 10 OvR quantifier types, not repeated
   per type.
-- CC/PCC's single full-data fit (on the original string `y`) reuses the
-  GPAC/FM/EMQ group's final full-data refit, if any.
 
-  GPAC + FM + EMQ (string y)      -> 11 shared fits
-  GAC (int-coded y, own group)    -> 11 shared fits
-  10 OvR quantifiers x 5 classes  -> 55 shared fits (11 per class)
-  CC, PCC -> reuse the GPAC/FM/EMQ group's full-data refit (0 extra, usually)
+  6 native multiclass quantifiers  -> 11 shared fits
+  10 OvR quantifiers x 5 classes   -> 55 shared fits (11 per class)
   ---------------------------------------------------------------------
-  cached total                                            ~=  77 real LITETime trainings
+  cached total                                            ~=  66 real LITETime trainings
 
 On not sharing across differently-labeled data: `_fingerprint` hashes
 `y`'s raw bytes/dtype, not a partition-only encoding (e.g. not
-`np.unique(y, return_inverse=True)[1]`), even though that would let GAC's
-int-coded subsets collide with GPAC/FM/EMQ's string-labeled ones (same
-row partition either way). This is intentional, not a missed
-optimization: a cache *hit* also hands back the cached model's
-`classes_` as-is, and `LabelEncodedQuantifier` depends on the classifier
-it wraps reporting `classes_` in its own `[0, ..., n_classes-1]` int
-encoding to decode predictions back to the original labels correctly.
-Unifying the two groups would hand GAC back a classifier whose
-`classes_` are the original string labels instead -- silently breaking
-that decoding. Treating differently-labeled data as a genuine cache miss
-costs a modest 11 extra fits; getting this wrong would be a silent
-correctness bug, not a performance one.
+`np.unique(y, return_inverse=True)[1]`) that would treat any two
+same-partition `y` arrays as identical regardless of their actual label
+values/dtype. This is intentional, not a missed optimization: a cache
+*hit* also hands back the cached model's `classes_` as-is, and
+`LabelEncodedQuantifier` depends on the classifier it wraps reporting
+`classes_` in its own `[0, ..., n_classes-1]` int encoding to decode
+predictions back to the original labels correctly. A partition-only
+fingerprint would risk silently handing a `LabelEncodedQuantifier`-wrapped
+quantifier a cached model fit on a *differently-labeled* -- even if
+same-partition -- `y` from somewhere else entirely, breaking that
+decoding. This is why `build_multiclass_quantifiers` standardizes on
+wrapping every native multiclass quantifier the same way (all six see
+integer-encoded `y`, byte-identical to each other), rather than trying to
+make the cache itself smarter about reconciling differently-labeled but
+same-partition data.
 
 This is not an approximation: a cache *hit* returns the exact classifier
 instance already fit on that exact training subset, so every quantifier

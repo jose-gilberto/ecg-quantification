@@ -12,20 +12,49 @@ original CBMS'26 paper (CC, ACC, PCC, PACC, EMQ, HDy) — the extension
 also reports HDx, ReadME, ED, DyS, FormanMM, GAC/GPAC/FM, CDE, and the
 threshold-selector family (X, Max, T50, MedianSweep).
 
-String labels ('N', 'V', 'A', 'L', 'R'): `GAC` is wrapped in
-`LabelEncodedQuantifier` below because it is the only natively multiclass
-quantifier here whose `_get_oof_method() == "predict"` (hard-label
-out-of-fold) — `quack.quantifiers.base.BaseCalibratedQuantifier.fit()`
-allocates that OOF buffer as a plain `float64` array regardless of `y`'s
-dtype, so fitting `GAC` directly on string multiclass labels raises
-`ValueError: could not convert string to float`. Every other native
-multiclass quantifier here (`GPAC`, `FM`, `EM`, the threshold family)
-uses `_get_oof_method() == "predict_proba"` (always numeric) and every
-OvR-wrapped binary quantifier below is fit by `OneVsRestQuantifier` on
-`int`-binarized labels (`(y == c).astype(int)`) — neither needs this.
-See `ecg_quantification.quantifiers._label_encoded_quantifier`'s module
-docstring for the full explanation (this is deliberately *not* fixed
-inside `quack` itself).
+String labels ('N', 'V', 'A', 'L', 'R'): every native multiclass
+quantifier below (`CC`, `PCC`, `GAC`, `GPAC`, `FM`, `EMQ`) is wrapped in
+`LabelEncodedQuantifier`, standardizing what those six actually fit on:
+integer-encoded labels internally, with `.classes_`/`.predict()` still
+exposing the original string labels to every caller (the wrapper is a
+transparent passthrough either way -- see its own module docstring).
+
+Only `GAC` strictly *needs* this to avoid crashing:
+`quack.quantifiers.base.BaseCalibratedQuantifier.fit()` allocates its
+hard-label (`_get_oof_method() == "predict"`) out-of-fold buffer as a
+plain `float64` array regardless of `y`'s dtype, so fitting `GAC`
+directly on string multiclass labels raises `ValueError: could not
+convert string to float`. `GPAC`, `FM`, `EMQ` use
+`_get_oof_method() == "predict_proba"` (always numeric) and `CC`/`PCC`
+never build an OOF buffer at all, so none of the other five would
+actually break without the wrapper.
+
+They are wrapped anyway, for two reasons:
+
+1. Consistency -- one rule ("every native multiclass quantifier here
+   sees integer-encoded `y` internally") instead of a GAC-only special
+   case that every future addition to this list has to remember to
+   re-check.
+2. Fit-cache sharing (see
+   `ecg_quantification.quantifiers._cached_classifier`, item 13):
+   `CachedFitClassifier` memoizes a wrapped classifier's `.fit()` by a
+   content hash of the exact `(X, y)` it's called with. Before this,
+   `GAC`'s integer-encoded `y` and `GPAC`/`FM`/`EMQ`'s original string
+   `y` were byte-different even for the identical underlying row
+   partition (`StratifiedKFold(shuffle=False)` is deterministic given
+   `(X, y, cv)`, but only up to the labels' actual representation) --
+   a correctness-motivated cache *miss* between two groups that could
+   otherwise safely share one. Standardizing every native multiclass
+   quantifier onto the same integer encoding collapses them back into a
+   single shared group when used with an expensive base classifier like
+   `LITETimeClassifier`.
+
+Every OvR-wrapped binary quantifier below is unaffected either way: it's
+fit by `OneVsRestQuantifier` on `int`-binarized labels
+(`(y == c).astype(int)`), never on the original `y`. See
+`ecg_quantification.quantifiers._label_encoded_quantifier`'s module
+docstring for the full explanation of the wrapper itself (this is
+deliberately *not* fixed inside `quack` itself).
 """
 from typing import Callable
 from sklearn.linear_model import LogisticRegression
@@ -95,28 +124,37 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
   Returns
   -------
   quantifiers : dict[str, BaseQuantifier]
-    Maps a short quantifier name to a fresh, unfitted instance.
+    Maps a short quantifier name to a fresh, unfitted instance. Every
+    entry is wrapped in `LabelEncodedQuantifier` (see this module's
+    docstring) -- `.classes_`/`.predict()` still expose the original
+    labels either way, so this is transparent to callers.
   """
   common_cv = dict(cv=cv, n_jobs=n_jobs, parallel_backend=parallel_backend)
 
+  # Every native multiclass quantifier here goes through
+  # LabelEncodedQuantifier -- not just GAC (the only one that strictly
+  # needs it to avoid crashing on string y) -- for consistency and so
+  # they all fit their base classifier on byte-identical integer-encoded
+  # labels, letting CachedFitClassifier (item 13) share one fit-cache
+  # group across all of them instead of splitting GAC into its own.
+  # See this module's docstring, "String labels", for the full rationale.
   quantifiers = {
-    'CC': CC(classifier=classifier_factory()),
-    'PCC': PCC(classifier=classifier_factory()),
-    # LabelEncodedQuantifier: see this function's docstring / this
-    # module's docstring -- GAC is the one native multiclass quantifier
-    # here that breaks on string labels without it.
+    'CC': LabelEncodedQuantifier(CC(classifier=classifier_factory())),
+    'PCC': LabelEncodedQuantifier(PCC(classifier=classifier_factory())),
     'GAC': LabelEncodedQuantifier(GAC(classifier=classifier_factory(), **common_cv)),
-    'GPAC': GPAC(classifier=classifier_factory(), **common_cv),
-    'FM': FM(classifier=classifier_factory(), **common_cv),
-    'EMQ': EM(classifier=classifier_factory(), **common_cv),
+    'GPAC': LabelEncodedQuantifier(GPAC(classifier=classifier_factory(), **common_cv)),
+    'FM': LabelEncodedQuantifier(FM(classifier=classifier_factory(), **common_cv)),
+    'EMQ': LabelEncodedQuantifier(EM(classifier=classifier_factory(), **common_cv)),
   }
 
   if include_threshold_family:
     quantifiers.update({
-      'X-native': X(classifier=classifier_factory(), **common_cv),
-      'Max-native': Max(classifier=classifier_factory(), **common_cv),
-      'T50-native': T50(classifier=classifier_factory(), **common_cv),
-      'MedianSweep-native': MedianSweep(classifier=classifier_factory(), **common_cv),
+      'X-native': LabelEncodedQuantifier(X(classifier=classifier_factory(), **common_cv)),
+      'Max-native': LabelEncodedQuantifier(Max(classifier=classifier_factory(), **common_cv)),
+      'T50-native': LabelEncodedQuantifier(T50(classifier=classifier_factory(), **common_cv)),
+      'MedianSweep-native': LabelEncodedQuantifier(
+        MedianSweep(classifier=classifier_factory(), **common_cv)
+      ),
     })
 
   return quantifiers

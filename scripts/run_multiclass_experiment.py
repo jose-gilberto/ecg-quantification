@@ -195,15 +195,19 @@ def main() -> None:
 
   # Every quantifier in the registry is fit directly on the original
   # string labels ('N', 'V', 'A', 'L', 'R') -- no manual encoding needed
-  # here. GAC (the one native multiclass quantifier that would otherwise
-  # break on string labels: quack's BaseCalibratedQuantifier.fit()
-  # allocates its hard-label out-of-fold buffer as a plain float64 array
-  # regardless of y's dtype) already comes out of build_registry() ->
-  # build_all_quantifiers() -> build_multiclass_quantifiers() wrapped in
-  # LabelEncodedQuantifier, which handles the encode/decode internally
-  # and exposes .classes_ as the original string labels. See
+  # here. Every native multiclass quantifier (CC, PCC, GAC, GPAC, FM,
+  # EMQ) already comes out of build_registry() -> build_all_quantifiers()
+  # -> build_multiclass_quantifiers() wrapped in LabelEncodedQuantifier,
+  # which encodes y to integers before fitting the base classifier and
+  # exposes .classes_ as the original string labels either way -- GAC is
+  # the only one of the six that would otherwise actually break on string
+  # labels (quack's BaseCalibratedQuantifier.fit() allocates its
+  # hard-label out-of-fold buffer as a plain float64 array regardless of
+  # y's dtype), the other five are wrapped too for consistency and so
+  # they share one fit-cache group when combined with
+  # ecg_quantification.quantifiers.CachedFitClassifier (item 13). See
   # ecg_quantification.quantifiers._label_encoded_quantifier's module
-  # docstring for why this lives here rather than being fixed in quack.
+  # docstring for the full explanation.
   all_classes = np.unique(np.concatenate([y_train, y_test]))
 
   print(f"\n=== Fitting all quantifiers on training data ===")
