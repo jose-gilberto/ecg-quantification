@@ -203,3 +203,12 @@ def test_default_gpu_device_fails_fast_without_a_gpu(tmp_path, splits_path, caps
   assert "ERROR: device='gpu' was requested but no GPU is visible" in out
   assert "--lite-time-device cpu" in out
   assert "fitting..." not in out
+
+
+def test_script_disables_xla_triton_gemm_unless_set_explicitly():
+  """Loading the script adds --xla_gpu_enable_triton_gemm=false to
+  XLA_FLAGS (workaround for XLA's Triton GEMM autotuner failing with an
+  older CUDA ptxas on GPU machines), without clobbering other flags. The
+  LITETime runs above then also prove TensorFlow's XLA accepts the flag:
+  an unknown flag in XLA_FLAGS aborts the process at first compilation."""
+  assert '--xla_gpu_enable_triton_gemm' in os.environ.get('XLA_FLAGS', '')

@@ -75,6 +75,22 @@ import time
 # still show; an explicit TF_CPP_MIN_LOG_LEVEL in the environment wins.
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 
+# XLA (which Keras uses to compile LITETime's training step on the GPU)
+# autotunes small matrix multiplications with Triton kernels compiled by
+# the CUDA `ptxas` it finds on the machine. With an older ptxas (CUDA
+# <= 12.6.2, e.g. a system/conda CUDA 12.4 found before the pip one) that
+# fails with "Autotuner could not compile any configs for HLO ...
+# __triton_gemm" on the very first training. Disabling Triton GEMM makes
+# XLA use cuBLAS for those multiplications instead: same results,
+# negligible cost here (LITETime's time is in its convolutions, and its
+# only dense layer is n_classes wide). Must be set before XLA's first
+# compilation; an explicit --xla_gpu_enable_triton_gemm in XLA_FLAGS wins.
+_XLA_TRITON_GEMM_FLAG = '--xla_gpu_enable_triton_gemm'
+if _XLA_TRITON_GEMM_FLAG not in os.environ.get('XLA_FLAGS', ''):
+  os.environ['XLA_FLAGS'] = (
+    os.environ.get('XLA_FLAGS', '') + f' {_XLA_TRITON_GEMM_FLAG}=false'
+  ).strip()
+
 import numpy as np
 
 from ecg_quantification import (
@@ -352,6 +368,8 @@ def main() -> None:
       log(f"ERROR: {error}")
       raise SystemExit(1)
     log(f"LITETime device: {args.lite_time_device.upper()} ({', '.join(devices)})")
+    if args.lite_time_device == 'gpu':
+      log(f"XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}")
     _quiet_tensorflow()
 
   log(f"=== [1/5] Loading splits from {args.splits_path} ===")

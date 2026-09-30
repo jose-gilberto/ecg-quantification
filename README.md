@@ -57,6 +57,22 @@ pip install -e ".[test,deep]"
 python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
 ```
 
+If a GPU run prints `Invoking ptxas with version 12.x ... Please upgrade
+to CUDA 12.6.3 or newer` and/or fails with `Autotuner could not compile
+any configs for HLO ... __triton_gemm`, XLA picked up an old `ptxas`
+(typically a system or conda CUDA found before the pip one).
+`run_multiclass_experiment.py` already works around the crash by setting
+`XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` (unless you set that flag
+yourself), but the warning is about ptxas miscompiling some edge cases,
+so upgrade it too:
+
+```bash
+which -a ptxas; ptxas --version        # which one is found first?
+pip install -U "nvidia-cuda-nvcc-cu12>=12.6.3,<13"
+# make the pip one win, if an older one is still found first:
+export PATH="$(python -c 'import nvidia.cuda_nvcc as m; print(list(m.__path__)[0])')/bin:$PATH"
+```
+
 `scripts/run_multiclass_experiment.py` trains LITETime on the GPU by
 default and stops right away, with a diagnosis, if TensorFlow sees none
 (`--lite-time-device cpu` trains on the CPU on purpose). The CPU-only

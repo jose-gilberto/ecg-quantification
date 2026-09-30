@@ -133,3 +133,12 @@ many new trainings it cost vs. reused from the cache. In practice, with
 remaining 10 of the native group, and `LITETime-ACC` (the first OvR
 quantifier) all 55 per-class ones -- every other LITETime quantifier
 then fits in seconds from the cache.
+
+**Update (XLA/ptxas on GPU)**: on the first real GPU run, Keras' XLA
+compilation of LITETime's training step failed with `Autotuner could not
+compile any configs for HLO ... __triton_gemm`, preceded by a warning
+that XLA was using `ptxas` 12.4 (CUDA <= 12.6.2). The script now sets
+`XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` before TensorFlow loads
+(XLA uses cuBLAS for those small matrix multiplications instead; an
+explicit setting in the environment is respected). Upgrading `ptxas` to
+>= 12.6.3 is still recommended -- see the README's `deep` extra section.
