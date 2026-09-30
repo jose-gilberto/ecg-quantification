@@ -111,22 +111,36 @@ anything.
 Scope note (what this does *not* solve): fitting the full registry this
 way still produces ~66 genuinely fitted deep ensembles, each potentially
 minutes to train -- a real, still-substantial cost, just no longer a
-~9x redundant one. It also does not address `ExperimentCheckpoint`
-(Fase 0) being unable to persist a *fitted* LITETime-based quantifier at
-all (aeon's `"cant_pickle": True` tag on a fitted `LITETimeClassifier`
-makes `joblib.dump` unreliable) -- this is the same, already-disclosed
-gap noted in `_lite_time`'s own module docstring, and remains a separate,
-not-yet-scheduled task; wiring `run_multiclass_experiment.py`'s
-checkpointed pipeline through LITETime is deliberately left out of this
-module.
+~9x redundant one. (Persisting the *fitted* quantifiers across process
+restarts is `ExperimentCheckpoint`'s job, not this in-memory cache's --
+see `docs/quantifier_registry_audit.md`'s item 14 note.)
+
+Progress reporting: every real training and every cache hit is logged
+on the `ecg_quantification.fit_cache` logger (INFO for trainings, which
+can take hours with LITETime; DEBUG for hits, which are instant), and
+`fit_cache_stats(cache_id)` returns running counts -- so a long run can
+show *which* underlying training it is on, not just which quantifier.
+This module never configures logging handlers itself (library
+convention); `scripts/run_multiclass_experiment.py` attaches one that
+prints these lines with a timestamp.
 """
+import datetime
 import hashlib
+import logging
+import time
 import numpy as np
 from sklearn.base import BaseEstimator, clone
 from sklearn.utils.validation import check_is_fitted
 
 
+logger = logging.getLogger("ecg_quantification.fit_cache")
+
 _FIT_CACHE: dict = {}
+# per-cache_id running counters, and each cached entry's training number
+# (1-based, in order of training) -- only used for progress reporting,
+# never for cache lookups themselves
+_FIT_STATS: dict = {}
+_FIT_ORDER: dict = {}
 
 
 def clear_fit_cache(cache_id: str = None) -> None:
@@ -143,9 +157,13 @@ def clear_fit_cache(cache_id: str = None) -> None:
   """
   if cache_id is None:
     _FIT_CACHE.clear()
+    _FIT_STATS.clear()
+    _FIT_ORDER.clear()
     return
   for key in [k for k in _FIT_CACHE if k[0] == cache_id]:
     del _FIT_CACHE[key]
+    _FIT_ORDER.pop(key, None)
+  _FIT_STATS.pop(cache_id, None)
 
 
 def fit_cache_size(cache_id: str = None) -> int:
@@ -156,6 +174,27 @@ def fit_cache_size(cache_id: str = None) -> int:
   if cache_id is None:
     return len(_FIT_CACHE)
   return sum(1 for k in _FIT_CACHE if k[0] == cache_id)
+
+
+def fit_cache_stats(cache_id: str) -> dict:
+  """Running counters for one `cache_id` scope since it was created (or
+  last cleared): `{'trainings': ..., 'hits': ...}` -- real `.fit()` calls
+  on the wrapped estimator vs. fits served from the cache. Meant for
+  progress reporting: diff it before/after fitting one quantifier to
+  report how many new trainings that quantifier actually cost."""
+  stats = _FIT_STATS.get(cache_id, {})
+  return {'trainings': stats.get('trainings', 0), 'hits': stats.get('hits', 0)}
+
+
+def _format_duration(seconds: float) -> str:
+  if seconds < 60:
+    return f"{seconds:.1f}s"
+  return str(datetime.timedelta(seconds=int(round(seconds))))
+
+
+def _describe_labels(y) -> str:
+  labels, counts = np.unique(np.asarray(y), return_counts=True)
+  return ", ".join(f"{label}={count}" for label, count in zip(labels.tolist(), counts.tolist()))
 
 
 def _fingerprint(X, y) -> str:
@@ -267,15 +306,32 @@ class CachedFitClassifier(BaseEstimator):
       Returns the fitted wrapper instance itself.
     """
     key = (self.cache_id, _fingerprint(X, y))
+    stats = _FIT_STATS.setdefault(self.cache_id, {'trainings': 0, 'hits': 0})
     cached = _FIT_CACHE.get(key)
 
     if cached is not None:
+      stats['hits'] += 1
+      logger.debug(
+        "fit cache hit: reusing training #%d (%d hits so far)",
+        _FIT_ORDER.get(key, 0), stats['hits'],
+      )
       self.estimator_ = cached
       self.from_cache_ = True
     else:
+      number = stats['trainings'] + 1
+      logger.info(
+        "training #%d started: %d samples, labels {%s}",
+        number, len(y), _describe_labels(y),
+      )
+      start = time.time()
       fitted = clone(self.base_estimator)
       fitted.fit(X, y)
+      # only counted once it actually finished, so an interrupted
+      # training never shows up as done
+      stats['trainings'] = number
       _FIT_CACHE[key] = fitted
+      _FIT_ORDER[key] = number
+      logger.info("training #%d done in %s", number, _format_duration(time.time() - start))
       self.estimator_ = fitted
       self.from_cache_ = False
 

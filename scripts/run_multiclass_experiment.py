@@ -37,20 +37,44 @@ python scripts/run_multiclass_experiment.py \
     --n-bags 200 --bag-sizes 100 200 500 --classifiers LR SVM GB RF --random-state 0
 
 # including LITETime (Fase 3, item 14) -- requires the [deep] extra
-# (aeon + tensorflow); always runs with n_jobs=None (see --classifiers'
-# help) and through a fit cache (item 13) regardless of --n-jobs:
+# (aeon + GPU-enabled tensorflow); always runs with n_jobs=None (see
+# --classifiers' help) and through a fit cache (item 13) regardless of
+# --n-jobs. Trains on the GPU by default and stops right away if none is
+# visible (pass --lite-time-device cpu to train on the CPU on purpose):
 python scripts/run_multiclass_experiment.py \
     --splits-path data/processed/splits_multiclass.npz \
     --output-dir results/multiclass_capp \
     --n-bags 200 --bag-sizes 100 200 500 \
     --classifiers LR SVM GB RF LITETime \
     --lite-time-n-classifiers 5 --lite-time-n-epochs 1500 \
-    --random-state 0
+    --random-state 0 2>&1 | tee run.log
+
+Progress output
+---------------
+Every line is timestamped and flushed immediately (so `| tee run.log` or
+a tmux pane shows it live). Each quantifier gets a `[i/N]` counter, a
+"fitting..." line *before* its fit starts and a "fit in ..." / "loaded
+from checkpoint" line after. For LITETime, every underlying network-
+ensemble training is also logged ("training #k started/done") along with
+how many trainings each quantifier cost vs. reused from the fit cache --
+a from-scratch run needs about (cv + 1) x (1 + n_classes) trainings in
+total (66 with cv=10 and 5 classes), most of them during the first
+native (CC) and the first OvR (ACC) quantifier; the rest mostly reuse
+cached fits and finish in seconds.
 """
 import argparse
+import datetime
+import logging
 import os
 import shutil
 import time
+
+# before anything can import TensorFlow (some dependencies do so at import
+# time): hide its C++ INFO/WARNING start-up chatter (oneDNN, CUDA factory
+# registration, ...) so the progress lines below stay readable. Errors
+# still show; an explicit TF_CPP_MIN_LOG_LEVEL in the environment wins.
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+
 import numpy as np
 
 from ecg_quantification import (
@@ -64,8 +88,67 @@ from ecg_quantification import (
   build_feature_space_quantifiers,
   LITETimeClassifier,
   cached_classifier_factory,
+  configure_tensorflow_device,
+  fit_cache_stats,
 )
 from quack.metrics import ae
+
+
+def log(message: str = "") -> None:
+  """Prints `message` prefixed with a timestamp (a bare call prints an
+  empty separator line), flushing immediately so progress shows up live
+  even when stdout is piped (`| tee run.log`), where Python would
+  otherwise buffer it in large blocks."""
+  if message:
+    message = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {message}"
+  print(message, flush=True)
+
+
+def format_duration(seconds: float) -> str:
+  if seconds < 60:
+    return f"{seconds:.1f}s"
+  return str(datetime.timedelta(seconds=int(round(seconds))))
+
+
+class _LogHandler(logging.Handler):
+  """Routes the package's own progress logging (e.g. LITETime's
+  per-training lines from `ecg_quantification.fit_cache`) through `log()`,
+  so it is timestamped/flushed like everything else. `print` resolves
+  `sys.stdout` at emit time, so this keeps working when stdout is
+  swapped (e.g. pytest's capsys)."""
+
+  is_run_multiclass_experiment_handler = True
+
+  def emit(self, record: logging.LogRecord) -> None:
+    log(f"      {self.format(record)}")
+
+
+def _attach_package_logging() -> None:
+  package_logger = logging.getLogger('ecg_quantification')
+  package_logger.setLevel(logging.INFO)
+  # printed here only: TensorFlow/cvxpy may configure the root logger
+  # mid-run, which would otherwise print every line a second time
+  package_logger.propagate = False
+  # marker attribute rather than isinstance: the script may be loaded
+  # more than once per process (tests load it by path), and each load
+  # defines its own _LogHandler class -- never stack duplicate handlers
+  if not any(getattr(h, 'is_run_multiclass_experiment_handler', False)
+             for h in package_logger.handlers):
+    package_logger.addHandler(_LogHandler())
+
+
+def _quiet_tensorflow() -> None:
+  """Keeps the terminal/log readable during LITETime runs: Keras' own
+  per-call progress bars (aeon's `predict_proba` calls `model.predict`
+  without `verbose=0`, printing a carriage-return bar per out-of-fold
+  prediction -- unreadable once piped to a log file) and TensorFlow's
+  harmless "tf.function retracing" warnings (every training builds fresh
+  models, so retracing is expected). Training progress is reported by
+  the fit cache's "training #k" lines instead."""
+  import keras
+  import tensorflow as tf
+  keras.config.disable_interactive_logging()
+  tf.get_logger().setLevel(logging.ERROR)
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,6 +202,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument('--lite-time-batch-size', type=int, default=64,
                        help="Batch size for LITETimeClassifier (only used if 'LITETime' is "
                             "in --classifiers).")
+  parser.add_argument('--lite-time-device', type=str, default='gpu', choices=['gpu', 'cpu'],
+                       help="Device LITETime trains on (only used if 'LITETime' is in "
+                            "--classifiers). 'gpu' (default) stops with a diagnosis before "
+                            "fitting anything if TensorFlow sees no GPU, instead of silently "
+                            "falling back to a much slower CPU run; 'cpu' hides any GPU. Not "
+                            "part of the checkpoint's run config, so a run can be resumed on "
+                            "the other device.")
 
   parser.add_argument('--include-threshold-family', action=argparse.BooleanOptionalAction, default=False,
                       help="Also evaluate native-multiclass X/Max/T50/MedianSweep alongside their "
@@ -216,21 +306,24 @@ def evaluate_quantifier(name: str,
 
 def main() -> None:
   args = parse_args()
+  run_start = time.time()
+  _attach_package_logging()
 
   output_dir = args.output_dir
   checkpoint_dir = args.checkpoint_dir or os.path.join(output_dir, '_checkpoint')
+  use_lite_time = 'LITETime' in args.classifiers
 
   if args.fresh and os.path.exists(checkpoint_dir):
-    print(f"=== --fresh given: removing existing checkpoint at {checkpoint_dir} ===")
+    log(f"=== --fresh given: removing existing checkpoint at {checkpoint_dir} ===")
     shutil.rmtree(checkpoint_dir)
 
   os.makedirs(output_dir, exist_ok=True)
   checkpoint = ExperimentCheckpoint(checkpoint_dir)
 
   # only settings that change *what* gets fitted/evaluated go into the
-  # run config -- n_jobs/parallel_backend only affect speed, not results,
-  # and forcing an exact match on those would make resuming with a
-  # different parallelism setting needlessly fail
+  # run config -- n_jobs/parallel_backend/device only affect speed, not
+  # what is being fitted, and forcing an exact match on those would make
+  # resuming with a different setting needlessly fail
   run_config = {
     'splits_path': args.splits_path,
     'classifiers': sorted(args.classifiers),
@@ -240,7 +333,7 @@ def main() -> None:
     'n_bags': args.n_bags,
     'bag_sizes': sorted(args.bag_sizes),
   }
-  if 'LITETime' in args.classifiers:
+  if use_lite_time:
     # part of the run config (not just speed/parallelism) -- unlike
     # n_jobs, these change what actually gets fitted
     run_config.update({
@@ -250,17 +343,35 @@ def main() -> None:
     })
   checkpoint.record_run_config(run_config)
 
-  print(f"=== Loading splits from {args.splits_path} ===")
+  if use_lite_time:
+    # before loading data or building anything: a missing GPU should stop
+    # the run within seconds, not after hours of CPU training
+    try:
+      devices = configure_tensorflow_device(args.lite_time_device)
+    except RuntimeError as error:
+      log(f"ERROR: {error}")
+      raise SystemExit(1)
+    log(f"LITETime device: {args.lite_time_device.upper()} ({', '.join(devices)})")
+    _quiet_tensorflow()
+
+  log(f"=== [1/5] Loading splits from {args.splits_path} ===")
   data = np.load(args.splits_path, allow_pickle=True)
   X_train, y_train = data['X_train'], data['y_train']
   X_test, y_test, ids_test = data['X_test'], data['y_test'], data['ids_test']
-  print(f"Train: {X_train.shape[0]} segments. Test pool: {X_test.shape[0]} segments "
-        f"from {len(np.unique(ids_test))} patients.")
+  log(f"Train: {X_train.shape[0]} segments. Test pool: {X_test.shape[0]} segments "
+      f"from {len(np.unique(ids_test))} patients.")
 
-  print(f"\n=== Building quantifier registry ===")
-  if 'LITETime' in args.classifiers and args.n_jobs not in (None, 1):
-    print(f"  NOTE: --n-jobs={args.n_jobs} is ignored for LITETime (always n_jobs=None) -- "
-          f"see --classifiers' help.")
+  log()
+  log("=== [2/5] Building quantifier registry ===")
+  if use_lite_time and args.n_jobs not in (None, 1):
+    log(f"  NOTE: --n-jobs={args.n_jobs} is ignored for LITETime (always n_jobs=None) -- "
+        f"see --classifiers' help.")
+  # one fit-cache scope per checkpoint_dir: reruns resuming the same
+  # checkpoint reasonably reuse the same scope name (harmless either
+  # way, since the cache is in-memory/per-process only -- cross-run
+  # reuse is what ExperimentCheckpoint's fitted-quantifier persistence
+  # already handles).
+  cache_id = checkpoint_dir
   registry = build_registry(
     args.classifiers, args.include_feature_space,
     cv=args.cv, n_jobs=args.n_jobs, parallel_backend=args.parallel_backend,
@@ -271,16 +382,11 @@ def main() -> None:
       batch_size=args.lite_time_batch_size,
       random_state=args.random_state,
     ),
-    # one fit-cache scope per checkpoint_dir: reruns resuming the same
-    # checkpoint reasonably reuse the same scope name (harmless either
-    # way, since the cache is in-memory/per-process only -- cross-run
-    # reuse is what ExperimentCheckpoint's fitted-quantifier persistence
-    # already handles).
-    cache_id=checkpoint_dir,
+    cache_id=cache_id,
   )
-  print(f"{len(registry)} quantifiers registered: {sorted(registry.keys())}")
+  log(f"{len(registry)} quantifiers registered: {sorted(registry.keys())}")
   if checkpoint.fitted_names:
-    print(f"Checkpoint found: {len(checkpoint.fitted_names)}/{len(registry)} already fitted, will be skipped.")
+    log(f"Checkpoint found: {len(checkpoint.fitted_names)}/{len(registry)} already fitted, will be skipped.")
 
   # Every quantifier in the registry is fit directly on the original
   # string labels ('N', 'V', 'A', 'L', 'R') -- no manual encoding needed
@@ -299,26 +405,48 @@ def main() -> None:
   # docstring for the full explanation.
   all_classes = np.unique(np.concatenate([y_train, y_test]))
 
-  print(f"\n=== Fitting all quantifiers on training data ===")
+  log()
+  log("=== [3/5] Fitting all quantifiers on training data ===")
+  if use_lite_time:
+    expected = (args.cv + 1) * (1 + len(np.unique(y_train)))
+    log(f"LITETime: a from-scratch run needs ~{expected} real trainings in total "
+        f"((cv + 1) x (1 + n_classes)); every other LITETime fit reuses one of them. "
+        f"When resuming, quantifiers already in the checkpoint are loaded, but the "
+        f"in-memory fit cache starts empty: the first not-yet-fitted native and OvR "
+        f"quantifier retrain their group's trainings once.")
   fitted = {}
-  for name, quantifier in registry.items():
+  n_total = len(registry)
+  for i, (name, quantifier) in enumerate(registry.items(), start=1):
+    tag = f"[{i}/{n_total}] {name}"
     if checkpoint.is_fitted(name):
       fitted[name] = checkpoint.load_fitted(name)
-      print(f"  {name}: loaded from checkpoint")
+      log(f"  {tag}: loaded from checkpoint")
       continue
 
+    is_lite_time = name.startswith('LITETime-')
+    before = fit_cache_stats(cache_id) if is_lite_time else None
+    log(f"  {tag}: fitting...")
     start = time.time()
     quantifier.fit(X_train, y_train)
     elapsed = time.time() - start
     checkpoint.save_fitted(name, quantifier)
     fitted[name] = quantifier
-    print(f"  {name}: fit in {elapsed:.1f}s")
+
+    detail = ""
+    if is_lite_time:
+      after = fit_cache_stats(cache_id)
+      detail = (f" ({after['trainings'] - before['trainings']} new LITETime trainings, "
+                f"{after['hits'] - before['hits']} reused from cache; "
+                f"{after['trainings']} trained so far)")
+    log(f"  {tag}: fit in {format_duration(elapsed)}{detail}")
 
   classes = all_classes
   zce_metric = ZoneCrossingError(clinical_ranges=CLINICAL_RANGES, classes=classes)
 
-  for bag_size in args.bag_sizes:
-    print(f"\n=== C-APP bags: bag_size={bag_size}, n_bags={args.n_bags} ===")
+  log()
+  log("=== [4/5] Evaluating on C-APP bags ===")
+  for b, bag_size in enumerate(args.bag_sizes, start=1):
+    log(f"--- bag size {b}/{len(args.bag_sizes)}: bag_size={bag_size}, n_bags={args.n_bags} ---")
     # regenerated every run (cheap) rather than checkpointed themselves:
     # with a fixed random_state, ClinicalPrevalenceBagGenerator produces
     # byte-identical bags every time, so this stays consistent with
@@ -334,11 +462,13 @@ def main() -> None:
     bags = generator.to_list(X_test, y_test)
     true_prevalences = generator.sampled_prevalences_
 
-    for name, quantifier in fitted.items():
+    for i, (name, quantifier) in enumerate(fitted.items(), start=1):
+      tag = f"[{i}/{len(fitted)}] {name}"
       if checkpoint.is_evaluated(name, bag_size):
-        print(f"  {name}: already evaluated for bag_size={bag_size}, skipping")
+        log(f"  {tag}: already evaluated for bag_size={bag_size}, skipping")
         continue
 
+      start = time.time()
       rows = evaluate_quantifier(name, quantifier, bags, true_prevalences, classes, zce_metric)
       for row in rows:
         row['bag_size'] = bag_size
@@ -346,14 +476,16 @@ def main() -> None:
 
       maes = [r['mae'] for r in rows]
       zces = [r['zce'] for r in rows]
-      print(f"  {name}: MAE={np.mean(maes):.4f} (±{np.std(maes):.4f})  "
-            f"ZCE={np.mean(zces):.4f} (±{np.std(zces):.4f})")
+      log(f"  {tag}: MAE={np.mean(maes):.4f} (±{np.std(maes):.4f})  "
+          f"ZCE={np.mean(zces):.4f} (±{np.std(zces):.4f})  "
+          f"[{format_duration(time.time() - start)}]")
 
-  print(f"\n=== Saving results to {output_dir} ===")
+  log()
+  log(f"=== [5/5] Saving results to {output_dir} ===")
   results_df = checkpoint.load_results()
   detailed_path = os.path.join(output_dir, 'detailed_results.csv')
   results_df.to_csv(detailed_path, index=False)
-  print(f"Saved per-bag detail: {detailed_path}")
+  log(f"Saved per-bag detail: {detailed_path}")
 
   summary = (
     results_df.groupby(['quantifier', 'bag_size'])
@@ -363,21 +495,26 @@ def main() -> None:
   )
   summary_path = os.path.join(output_dir, 'summary_table.csv')
   summary.to_csv(summary_path, index=False)
-  print(f"Saved summary table: {summary_path}")
+  log(f"Saved summary table: {summary_path}")
 
-  print("\n=== Best quantifier per bag size (by MAE) ===")
+  log()
+  log("=== Best quantifier per bag size (by MAE) ===")
   for bag_size in args.bag_sizes:
     subset = summary[summary['bag_size'] == bag_size].sort_values('mae_mean')
     best = subset.iloc[0]
-    print(f"  bag_size={bag_size}: {best['quantifier']} "
-          f"(MAE={best['mae_mean']:.4f}, ZCE={best['zce_mean']:.4f})")
+    log(f"  bag_size={bag_size}: {best['quantifier']} "
+        f"(MAE={best['mae_mean']:.4f}, ZCE={best['zce_mean']:.4f})")
 
-  print("\n=== Best quantifier per bag size (by ZCE) ===")
+  log()
+  log("=== Best quantifier per bag size (by ZCE) ===")
   for bag_size in args.bag_sizes:
     subset = summary[summary['bag_size'] == bag_size].sort_values('zce_mean')
     best = subset.iloc[0]
-    print(f"  bag_size={bag_size}: {best['quantifier']} "
-          f"(ZCE={best['zce_mean']:.4f}, MAE={best['mae_mean']:.4f})")
+    log(f"  bag_size={bag_size}: {best['quantifier']} "
+        f"(ZCE={best['zce_mean']:.4f}, MAE={best['mae_mean']:.4f})")
+
+  log()
+  log(f"Done in {format_duration(time.time() - run_start)}.")
 
 
 if __name__ == '__main__':

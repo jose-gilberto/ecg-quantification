@@ -36,9 +36,33 @@ pip install -e ".[test]"
 #### Deep-learning classifier adapters (`.[deep]`, e.g. `LITETimeClassifier`)
 
 The `deep` extra (`pip install -e ".[test,deep]"`) additionally installs
-`aeon` + `tensorflow`/`tensorflow-cpu`, needed only for deep-learning
-classifier adapters under `ecg_quantification.quantifiers`
-(`LITETimeClassifier` today; likely `ECGFounderClassifier` later). This
+`aeon` + TensorFlow, needed only for deep-learning classifier adapters
+under `ecg_quantification.quantifiers` (`LITETimeClassifier` today; likely
+`ECGFounderClassifier` later).
+
+- `.[deep]` -- for real experiments. On Linux it installs the GPU build,
+  `tensorflow[and-cuda]` (CUDA/cuDNN come as pip wheels; only an NVIDIA
+  driver is needed on the machine). Native Windows/macOS get plain
+  `tensorflow`, which is CPU-only there (Windows GPU requires WSL2).
+- `.[deep-cpu]` -- the much lighter `tensorflow-cpu` build, for tests/CI
+  or machines without a GPU.
+
+Never install both in the same environment -- `tensorflow` and
+`tensorflow-cpu` share the `tensorflow` import namespace. Switching from
+an earlier `deep`/`deep-cpu` install:
+
+```bash
+pip uninstall -y tensorflow-cpu tensorflow
+pip install -e ".[test,deep]"
+python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
+```
+
+`scripts/run_multiclass_experiment.py` trains LITETime on the GPU by
+default and stops right away, with a diagnosis, if TensorFlow sees none
+(`--lite-time-device cpu` trains on the CPU on purpose). The CPU-only
+test suite covers the CPU path; see `configure_tensorflow_device`.
+
+This
 has a Python **upper** bound the base package does not: as of this
 writing, TensorFlow's newest *stable* release (2.21.0) only ships wheels
 up to Python 3.13 -- Python 3.14+ (only a pre-release/`rc` build declares
@@ -46,7 +70,7 @@ support, not yet suitable for a reproducible experiment environment) will
 fail to resolve with something like:
 
 ```
-ERROR: Could not find a version that satisfies the requirement tensorflow-cpu>=2.16 ...
+ERROR: Could not find a version that satisfies the requirement tensorflow>=2.16 ...
 ```
 
 If `python3 --version` reports 3.14 or newer, create a *separate* venv

@@ -275,3 +275,32 @@ class TestResume:
     assert set(classifier.classes_) == {'N', 'V'}
     preds = classifier.predict(X)
     assert preds.shape == (20,)
+
+
+class TestConfigureTensorflowDevice:
+  """`configure_tensorflow_device`: the GPU-by-default switch used by
+  `run_multiclass_experiment.py --lite-time-device`. The GPU-present
+  paths can't be exercised on CPU-only CI; these cover argument
+  validation and the no-GPU behavior (fail fast for 'gpu', plain CPU for
+  'cpu')."""
+
+  def test_rejects_unknown_device(self):
+    from ecg_quantification.quantifiers import configure_tensorflow_device
+    with pytest.raises(ValueError, match="'gpu' or 'cpu'"):
+      configure_tensorflow_device("tpu")
+
+  def test_cpu_device(self):
+    import tensorflow as tf
+    from ecg_quantification.quantifiers import configure_tensorflow_device
+    if tf.config.list_physical_devices("GPU"):
+      pytest.skip("GPU present: hiding it would affect the rest of this test session")
+    assert configure_tensorflow_device("cpu") == ["CPU"]
+
+  def test_gpu_device_without_gpu_fails_fast_with_a_diagnosis(self):
+    import tensorflow as tf
+    from ecg_quantification.quantifiers import configure_tensorflow_device
+    if tf.config.list_physical_devices("GPU"):
+      pytest.skip("GPU present: the fail-fast path can't be exercised")
+    expected = "CPU-only" if not tf.test.is_built_with_cuda() else "sees no GPU"
+    with pytest.raises(RuntimeError, match=expected):
+      configure_tensorflow_device("gpu")

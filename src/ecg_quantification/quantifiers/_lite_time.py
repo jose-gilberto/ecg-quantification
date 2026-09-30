@@ -136,10 +136,19 @@ intentionally NOT imported at module load time: importing
 install on users who only need the sklearn-based quantifiers. The import
 is deferred to `_load_lite_time`, the first point a `LITETimeClassifier`
 is actually built.
+
+NOTE on GPU: TensorFlow places LITETime's training on a GPU by itself
+whenever a CUDA-enabled build sees one -- nothing in this adapter forces
+a device. The `[deep]` extra therefore installs `tensorflow[and-cuda]` on
+Linux (`[deep-cpu]` keeps the light CPU-only build for tests/CI).
+`configure_tensorflow_device` below makes the choice explicit and fails
+fast when a GPU was expected but is not visible, rather than letting a
+multi-hour experiment silently run on the CPU.
 """
 import functools
 import os
 import tempfile
+import warnings
 import numpy as np
 from quack.utils.wrappers import SklearnClassifierWrapper
 
@@ -243,6 +252,112 @@ def _load_lite_time(n_classifiers: int = 5,
     )
 
   return _AeonLITETimeClassifier(**build_kwargs)
+
+
+def configure_tensorflow_device(device: str = "gpu", memory_growth: bool = True) -> list[str]:
+  """Pins TensorFlow (and therefore every `LITETimeClassifier` built in
+  this process) to the GPU or the CPU, failing fast instead of silently
+  training on the CPU when a GPU was expected.
+
+  Call this once, before any `LITETimeClassifier` is fitted: TensorFlow
+  only allows device visibility and memory growth to be changed before
+  its runtime initializes the physical devices. Calling it again with
+  the same `device` afterwards is a harmless no-op (it only re-reads the
+  current state), so scripts/tests invoking a `main()` twice in the same
+  process are fine.
+
+  Parameters
+  ----------
+  device : {"gpu", "cpu"}, default = "gpu"
+    `"gpu"`: require at least one visible GPU, raising `RuntimeError`
+    with a diagnosis (CPU-only TensorFlow build vs. no GPU visible to a
+    CUDA build) if none is found. `"cpu"`: hide every GPU from
+    TensorFlow, so training runs on the CPU even on a GPU machine.
+  memory_growth : bool, default = True
+    With `device="gpu"`, allocate GPU memory on demand instead of
+    TensorFlow's default of reserving (almost) all of it at start-up --
+    friendlier to a GPU shared with other jobs, with no effect on
+    results.
+
+  Returns
+  -------
+  devices : list of str
+    Human-readable names of the devices TensorFlow will train on (GPU
+    model names, or `["CPU"]`), for logging.
+
+  Raises
+  ------
+  ValueError
+    If `device` is not `"gpu"` or `"cpu"`.
+  RuntimeError
+    If `device="gpu"` and TensorFlow sees no GPU.
+  """
+  if device not in ("gpu", "cpu"):
+    raise ValueError(f"device must be 'gpu' or 'cpu', got {device!r}.")
+
+  # silence TensorFlow's C++ INFO/WARNING start-up chatter (CUDA factory
+  # registration, oneDNN notices, ...) so the experiment's own progress
+  # lines stay readable in the terminal/log; only effective if TF has not
+  # been imported yet, and never overrides an explicit user setting
+  os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+  import tensorflow as tf
+
+  gpus = tf.config.list_physical_devices("GPU")
+
+  if device == "cpu":
+    if gpus and tf.config.get_visible_devices("GPU"):
+      try:
+        tf.config.set_visible_devices([], "GPU")
+      except RuntimeError:
+        # the runtime is already initialized (a model was built earlier
+        # in this process): visibility can no longer change. Say so
+        # rather than crash, and report what will really be used.
+        warnings.warn(
+          "configure_tensorflow_device('cpu') was called after TensorFlow "
+          "initialized its devices, so the GPU could not be hidden and will "
+          "still be used. Call it before building/fitting any model.",
+          RuntimeWarning,
+        )
+        return [tf.config.experimental.get_device_details(g).get("device_name", g.name) for g in gpus]
+    return ["CPU"]
+
+  if not gpus:
+    if not tf.test.is_built_with_cuda():
+      reason = (
+        "the installed TensorFlow build is CPU-only (e.g. the `tensorflow-cpu` "
+        "package, or plain `tensorflow` on native Windows/macOS). On Linux, "
+        "reinstall with GPU support:\n"
+        "    pip uninstall -y tensorflow-cpu tensorflow\n"
+        "    pip install -e \".[deep]\"   # pulls tensorflow[and-cuda]\n"
+        "On Windows, TensorFlow >= 2.11 only uses the GPU under WSL2."
+      )
+    else:
+      reason = (
+        "TensorFlow was built with CUDA but sees no GPU: check `nvidia-smi` "
+        "(driver loaded?) and that CUDA_VISIBLE_DEVICES is not hiding it."
+      )
+    raise RuntimeError(
+      f"device='gpu' was requested but no GPU is visible to TensorFlow: {reason}\n"
+      f"To train on the CPU on purpose, pass device='cpu' "
+      f"(`--lite-time-device cpu` in the experiment scripts)."
+    )
+
+  if memory_growth:
+    for gpu in gpus:
+      if not tf.config.experimental.get_memory_growth(gpu):
+        try:
+          tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError:
+          # the runtime is already initialized (a model was built before
+          # this call): memory growth can no longer change, but the GPU is
+          # still used -- not worth failing the whole run over
+          pass
+
+  names = []
+  for gpu in gpus:
+    details = tf.config.experimental.get_device_details(gpu)
+    names.append(details.get("device_name", gpu.name))
+  return names
 
 
 def _checkpoint_member_paths(model) -> list:

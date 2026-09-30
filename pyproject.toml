@@ -63,7 +63,23 @@ test = [
 # install on users who only need the sklearn-based quantifiers, and
 # _lite_time.py defers its `aeon`/`tensorflow` import accordingly (see
 # that module's docstring).
+#
+# `deep` targets the real experiments, so on Linux it installs the
+# GPU-enabled TensorFlow build (`tensorflow[and-cuda]` pulls matching
+# CUDA/cuDNN wheels via pip -- no system CUDA toolkit needed, only an
+# NVIDIA driver). Elsewhere plain `tensorflow` is the only option (native
+# Windows and macOS builds are CPU-only; Windows GPU needs WSL2).
+# `deep-cpu` keeps the much lighter CPU-only build for tests/CI.
+# Never install both into the same environment: `tensorflow` and
+# `tensorflow-cpu` ship the same `tensorflow` import namespace and
+# clobber each other -- `pip uninstall -y tensorflow-cpu` before
+# switching from `deep-cpu` to `deep`.
 deep = [
+    "aeon>=1.6",
+    "tensorflow[and-cuda]>=2.16; sys_platform == 'linux'",
+    "tensorflow>=2.16; sys_platform != 'linux'",
+]
+deep-cpu = [
     "aeon>=1.6",
     "tensorflow-cpu>=2.16; sys_platform != 'darwin'",
     "tensorflow>=2.16; sys_platform == 'darwin'",

@@ -103,6 +103,9 @@ def _run(splits_path, output_dir, checkpoint_dir, extra_argv=()):
     '--lite-time-n-classifiers', '1',
     '--lite-time-n-epochs', '1',
     '--lite-time-batch-size', '8',
+    # this suite must run on CPU-only machines/CI; the GPU default and its
+    # fail-fast path are covered separately below
+    '--lite-time-device', 'cpu',
     *extra_argv,
   ]
   old_argv = sys.argv
@@ -113,11 +116,23 @@ def _run(splits_path, output_dir, checkpoint_dir, extra_argv=()):
     sys.argv = old_argv
 
 
-def test_lite_time_run_fits_checkpoints_and_evaluates(tmp_path, splits_path):
+def test_lite_time_run_fits_checkpoints_and_evaluates(tmp_path, splits_path, capsys):
   output_dir = str(tmp_path / "output")
   checkpoint_dir = str(tmp_path / "checkpoint")
 
   _run(splits_path, output_dir, checkpoint_dir)
+  out = capsys.readouterr().out
+
+  # progress reporting: device, per-quantifier counters before/after each
+  # fit, and every real LITETime training (cv=2, 5 classes ->
+  # (2 + 1) x (1 + 5) = 18 trainings), each logged once when it starts
+  assert "LITETime device: CPU" in out
+  assert "[1/16] LITETime-CC: fitting..." in out
+  assert "[16/16] LITETime-CDE: fit in" in out
+  assert out.count("training #") == 2 * 18  # one 'started' + one 'done' line each
+  assert "training #18 done" in out
+  assert "training #19" not in out
+  assert "new LITETime trainings" in out
 
   detailed = pd.read_csv(os.path.join(output_dir, 'detailed_results.csv'))
   summary = pd.read_csv(os.path.join(output_dir, 'summary_table.csv'))
@@ -156,3 +171,35 @@ def test_lite_time_rerun_reuses_checkpoint_without_refitting(tmp_path, splits_pa
 
   assert captured.out.count("loaded from checkpoint") == 16
   assert "already evaluated for bag_size=10" in captured.out
+
+
+def test_default_gpu_device_fails_fast_without_a_gpu(tmp_path, splits_path, capsys):
+  """The default --lite-time-device is 'gpu': on a machine where
+  TensorFlow sees no GPU the run must stop before fitting anything,
+  instead of silently training for hours on the CPU."""
+  import tensorflow as tf
+  if tf.config.list_physical_devices("GPU"):
+    pytest.skip("a GPU is visible here; the fail-fast path can't be exercised")
+
+  output_dir = str(tmp_path / "output")
+  checkpoint_dir = str(tmp_path / "checkpoint")
+  argv = [
+    'run_multiclass_experiment.py',
+    '--splits-path', splits_path, '--output-dir', output_dir,
+    '--checkpoint-dir', checkpoint_dir,
+    '--classifiers', 'LITETime', '--no-include-feature-space',
+    '--n-bags', '3', '--bag-sizes', '10', '--cv', '2',
+    '--lite-time-n-classifiers', '1', '--lite-time-n-epochs', '1',
+  ]
+  old_argv = sys.argv
+  sys.argv = argv
+  try:
+    with pytest.raises(SystemExit):
+      run_experiment.main()
+  finally:
+    sys.argv = old_argv
+
+  out = capsys.readouterr().out
+  assert "ERROR: device='gpu' was requested but no GPU is visible" in out
+  assert "--lite-time-device cpu" in out
+  assert "fitting..." not in out

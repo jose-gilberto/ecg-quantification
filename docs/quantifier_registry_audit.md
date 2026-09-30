@@ -117,3 +117,19 @@ requires the `[deep]` extra and the actual MITBIH splits (not available
 in every environment -- e.g. PhysioNet is unreachable from this
 sandbox's network egress, so the real Fase 3 item 14 comparison numbers
 still need to be produced on a machine with both installed).
+
+**Update (GPU + progress output)**: the `[deep]` extra now installs
+`tensorflow[and-cuda]` on Linux (`[deep-cpu]` keeps the CPU-only build),
+and `run_multiclass_experiment.py` trains LITETime on the GPU by default
+(`--lite-time-device {gpu,cpu}`), failing fast before any fitting if no
+GPU is visible. Its output is timestamped and flushed line by line (safe
+to `| tee` or watch in tmux), with `[i/N]` counters before/after every
+quantifier fit and evaluation. `CachedFitClassifier` logs every real
+training ("training #k started/done") on the
+`ecg_quantification.fit_cache` logger and keeps counters
+(`fit_cache_stats`), so each LITETime quantifier's fit line reports how
+many new trainings it cost vs. reused from the cache. In practice, with
+`cv=10` and 5 classes, `LITETime-CC` pays 1 training, `LITETime-GAC` the
+remaining 10 of the native group, and `LITETime-ACC` (the first OvR
+quantifier) all 55 per-class ones -- every other LITETime quantifier
+then fits in seconds from the cache.

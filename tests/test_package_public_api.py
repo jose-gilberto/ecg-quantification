@@ -34,10 +34,12 @@ EXPECTED_PUBLIC_SYMBOLS = {
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
   'LITETimeClassifier',
+  'configure_tensorflow_device',
   'CachedFitClassifier',
   'cached_classifier_factory',
   'clear_fit_cache',
   'fit_cache_size',
+  'fit_cache_stats',
   'aggregate_prevalence_to_binary',
   'aggregate_bag_true_prevalences_to_binary',
 }

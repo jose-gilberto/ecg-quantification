@@ -21,12 +21,14 @@ from ecg_quantification.quantifiers import (
   build_all_quantifiers,
   # ECGFounderClassifier,
   LITETimeClassifier,
+  configure_tensorflow_device,
   OneVsRestQuantifier,
   LabelEncodedQuantifier,
   CachedFitClassifier,
   cached_classifier_factory,
   clear_fit_cache,
   fit_cache_size,
+  fit_cache_stats,
 )
 
 __all__ = [
@@ -66,10 +68,12 @@ __all__ = [
   'build_all_quantifiers',
   # 'ECGFounderClassifier',
   'LITETimeClassifier',
+  'configure_tensorflow_device',
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
   'CachedFitClassifier',
   'cached_classifier_factory',
   'clear_fit_cache',
   'fit_cache_size',
+  'fit_cache_stats',
 ]

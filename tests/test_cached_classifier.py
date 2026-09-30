@@ -20,8 +20,11 @@ import pytest
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.linear_model import LogisticRegression
 
+import logging
+
 from ecg_quantification.quantifiers import (
   CachedFitClassifier, cached_classifier_factory, clear_fit_cache, fit_cache_size,
+  fit_cache_stats,
 )
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
 from quack.quantifiers import CC, ACC, PACC, GPAC
@@ -172,6 +175,46 @@ class TestCachedFitClassifierMechanics:
     assert fit_cache_size('scope-x') == 2
     assert fit_cache_size('scope-y') == 1
     assert fit_cache_size() >= 3
+
+
+class TestProgressReporting:
+  """Every real training and every cache hit is visible (counters +
+  the `ecg_quantification.fit_cache` logger), so long LITETime runs can
+  report which underlying training they are on."""
+
+  def test_stats_count_trainings_and_hits(self):
+    X, y = _make_data(seed=11)
+    X2, y2 = _make_data(seed=12)
+    factory = cached_classifier_factory(_counting_factory("stats"), cache_id="stats-scope")
+    assert fit_cache_stats("stats-scope") == {'trainings': 0, 'hits': 0}
+
+    factory().fit(X, y)
+    factory().fit(X, y)
+    factory().fit(X, y)
+    factory().fit(X2, y2)
+
+    assert fit_cache_stats("stats-scope") == {'trainings': 2, 'hits': 2}
+    clear_fit_cache("stats-scope")
+    assert fit_cache_stats("stats-scope") == {'trainings': 0, 'hits': 0}
+
+  def test_trainings_logged_at_info_hits_at_debug(self, caplog, monkeypatch):
+    # run_multiclass_experiment.py turns propagation off for its own
+    # printing; make sure caplog (a root handler) still sees the records
+    # even if that script already ran earlier in this test session
+    monkeypatch.setattr(logging.getLogger("ecg_quantification"), "propagate", True)
+    X, y = _make_data(seed=13)
+    factory = cached_classifier_factory(_counting_factory("logs"), cache_id="log-scope")
+
+    with caplog.at_level(logging.DEBUG, logger="ecg_quantification.fit_cache"):
+      factory().fit(X, y)
+      factory().fit(X, y)
+
+    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(info) == 2
+    assert info[0].startswith(f"training #1 started: {len(y)} samples")
+    assert info[1].startswith("training #1 done in")
+    assert debug == ["fit cache hit: reusing training #1 (1 hits so far)"]
 
 
 class TestFoldSharingAcrossQuantifiers:
