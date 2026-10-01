@@ -49,6 +49,20 @@ python scripts/run_multiclass_experiment.py \
     --lite-time-n-classifiers 5 --lite-time-n-epochs 1500 \
     --random-state 0 2>&1 | tee run.log
 
+# including ECGFounder (Fase 4) -- requires the [ecgfounder] extra
+# (PyTorch + huggingface_hub). Linear probe on the frozen pretrained
+# backbone by default; weights downloaded once from Hugging Face unless
+# --ecg-founder-checkpoint points to a local 1_lead_ECGFounder.pth. Use a
+# separate --output-dir from a run with a different --classifiers list
+# (the checkpoint's run config must match to resume):
+python scripts/run_multiclass_experiment.py \
+    --splits-path data/processed/splits_multiclass.npz \
+    --output-dir results/multiclass_capp_ecgfounder \
+    --n-bags 200 --bag-sizes 100 200 500 \
+    --classifiers ECGFounder --no-include-feature-space \
+    --ecg-founder-mode linear-probe \
+    --random-state 0 2>&1 | tee run_ecgfounder.log
+
 Progress output
 ---------------
 Every line is timestamped and flushed immediately (so `| tee run.log` or
@@ -56,7 +70,8 @@ a tmux pane shows it live). Each quantifier gets a `[i/N]` counter, a
 "fitting..." line *before* its fit starts and a "fit in ..." / "loaded
 from checkpoint" line after. For LITETime, every underlying network-
 ensemble training is also logged ("training #k started/done") along with
-how many trainings each quantifier cost vs. reused from the fit cache --
+how many trainings each quantifier cost vs. reused from the fit cache
+(ECGFounder likewise, plus one line per fine-tuning epoch) --
 a from-scratch run needs about (cv + 1) x (1 + n_classes) trainings in
 total (66 with cv=10 and 5 classes), most of them during the first
 native (CC) and the first OvR (ACC) quantifier; the rest mostly reuse
@@ -103,10 +118,17 @@ from ecg_quantification import (
   build_all_quantifiers,
   build_feature_space_quantifiers,
   LITETimeClassifier,
+  ECGFounderClassifier,
   cached_classifier_factory,
   configure_tensorflow_device,
+  configure_torch_device,
+  resolve_ecg_founder_checkpoint,
   fit_cache_stats,
 )
+
+# deep classifiers: fit through a per-classifier fit cache, always with
+# n_jobs=None (see build_registry), and reported training by training
+DEEP_CLASSIFIERS = ('LITETime', 'ECGFounder')
 from quack.metrics import ae
 
 
@@ -187,14 +209,16 @@ def parse_args() -> argparse.Namespace:
                        help="Bag sizes to evaluate, mirroring CBMS'26 Table I.")
 
   parser.add_argument('--classifiers', type=str, nargs='+', default=['LR', 'SVM', 'GB', 'RF'],
-                       choices=['LR', 'SVM', 'GB', 'RF', 'LITETime'],
-                       help="Base classifiers to evaluate every quantifier with. 'LITETime' "
-                            "(aeon's deep-learning ensemble, requires the [deep] extra) is "
-                            "automatically run with n_jobs=None and through a fit cache "
-                            "(see --lite-time-* flags and item 13's docs) regardless of "
-                            "--n-jobs, since a per-fold process-parallel refit of a deep "
-                            "model is both uncachable across processes and resource-"
-                            "wasteful (see docs/quantifier_registry_audit.md).")
+                       choices=['LR', 'SVM', 'GB', 'RF', 'LITETime', 'ECGFounder'],
+                       help="Base classifiers to evaluate every quantifier with. The deep "
+                            "ones -- 'LITETime' (aeon's deep-learning ensemble, [deep] extra) "
+                            "and 'ECGFounder' (pretrained ECG foundation model, [ecgfounder] "
+                            "extra) -- are automatically run with n_jobs=None and through a "
+                            "fit cache (see the --lite-time-*/--ecg-founder-* flags and item "
+                            "13's docs) regardless of --n-jobs, since a per-fold process-"
+                            "parallel refit of a deep model is both uncachable across "
+                            "processes and resource-wasteful (see "
+                            "docs/quantifier_registry_audit.md).")
   parser.add_argument('--include-feature-space', action=argparse.BooleanOptionalAction, default=True,
                        help="Also evaluate classifier-free quantifiers (HDx, ReadMe, ED).")
 
@@ -226,11 +250,50 @@ def parse_args() -> argparse.Namespace:
                             "part of the checkpoint's run config, so a run can be resumed on "
                             "the other device.")
 
+  parser.add_argument('--ecg-founder-checkpoint', type=str, default=None,
+                       help="Local 1_lead_ECGFounder.pth (only used if 'ECGFounder' is in "
+                            "--classifiers). Default: $ECGFOUNDER_CHECKPOINT, else downloaded "
+                            "once from Hugging Face (PKUDigitalHealth/ECGFounder, 370 MB) "
+                            "before anything is fitted.")
+  parser.add_argument('--ecg-founder-mode', type=str, default='linear-probe',
+                       choices=['linear-probe', 'finetune'],
+                       help="'linear-probe' (default): frozen pretrained backbone + logistic "
+                            "regression on its features -- cheap. 'finetune': full fine-"
+                            "tuning of the whole network per training subset (~66 trainings "
+                            "with cv=10 and 5 classes) -- expensive; see the --ecg-founder-* "
+                            "flags below.")
+  parser.add_argument('--ecg-founder-n-epochs', type=int, default=5,
+                       help="Fine-tuning epochs (finetune mode; official notebook: 5).")
+  parser.add_argument('--ecg-founder-batch-size', type=int, default=256,
+                       help="Training/inference batch size for ECGFounder.")
+  parser.add_argument('--ecg-founder-lr', type=float, default=1e-4,
+                       help="Fine-tuning learning rate (Adam; official notebook: 1e-4).")
+  parser.add_argument('--ecg-founder-validation-fraction', type=float, default=0.1,
+                       help="Fine-tuning: stratified share of each training subset held out "
+                            "to keep the epoch with the lowest validation loss (0 = last epoch).")
+  parser.add_argument('--ecg-founder-input-fs', type=int, default=360,
+                       help="Sampling rate of the beat segments in --splits-path (MIT-BIH: "
+                            "360 Hz); resampled to ECGFounder's 500 Hz.")
+  parser.add_argument('--ecg-founder-filter', action=argparse.BooleanOptionalAction, default=True,
+                       help="Apply ECGFounder's pretraining filter chain (50 Hz notch, "
+                            "0.67-40 Hz band-pass, median baseline removal) to every segment.")
+  parser.add_argument('--ecg-founder-device', type=str, default='cuda', choices=['cuda', 'cpu'],
+                       help="Device for ECGFounder. 'cuda' (default) stops before fitting "
+                            "anything if PyTorch sees no GPU. Not part of the run config.")
+  parser.add_argument('--ecg-founder-trust-checkpoint', action='store_true',
+                       help="Allow loading the pretrained file with full unpickling if it "
+                            "holds more than tensors/plain data (only for a trusted file).")
+
   parser.add_argument('--include-threshold-family', action=argparse.BooleanOptionalAction, default=False,
                       help="Also evaluate native-multiclass X/Max/T50/MedianSweep alongside their "
                           "OvR-wrapped counterparts (ablation: OvR decomposition vs. native generalization).")
 
   return parser.parse_args()
+
+
+def fit_cache_id(base: str, classifier_name: str) -> str:
+  """Fit-cache scope of one deep classifier within one run."""
+  return f"{base}::{classifier_name}"
 
 
 def build_registry(classifier_names: list[str],
@@ -240,7 +303,8 @@ def build_registry(classifier_names: list[str],
                    parallel_backend: str,
                    include_threshold_family: bool = False,
                    lite_time_kwargs: dict = None,
-                   cache_id: str = None) -> dict[str, object]:
+                   cache_id: str = None,
+                   ecg_founder_kwargs: dict = None) -> dict[str, object]:
   """Assembles the full quantifier registry to evaluate: every
   classifier x quantifier combination, plus classifier-free feature-space
   quantifiers if requested.
@@ -252,15 +316,23 @@ def build_registry(classifier_names: list[str],
     `classifier_names` (e.g. `n_classifiers`, `n_epochs`, `batch_size`,
     `random_state`). Ignored otherwise.
   cache_id : str, default = None
-    Forwarded to `cached_classifier_factory` for LITETime's fit cache
-    (item 13) -- give every independent run a distinct id (e.g. derived
-    from `--checkpoint-dir`) so unrelated runs sharing this process
-    never share cached fits. Required when `'LITETime'` is requested.
+    Base scope for the deep classifiers' fit caches (item 13) -- give
+    every independent run a distinct id (e.g. derived from
+    `--checkpoint-dir`) so unrelated runs sharing this process never
+    share cached fits. Each deep classifier gets its own scope,
+    `fit_cache_id(cache_id, name)`: the cache keys on the training data
+    alone, so LITETime and ECGFounder fitting the very same subset must
+    never be served each other's model. Required when a deep classifier
+    is requested.
+  ecg_founder_kwargs : dict, default = None
+    Forwarded to `ECGFounderClassifier(...)` when `'ECGFounder'` is in
+    `classifier_names`. Ignored otherwise.
 
   Notes
   -----
-  LITETime is always built with `n_jobs=None` regardless of the `n_jobs`
-  argument, and through `cached_classifier_factory` so the ~16
+  The deep classifiers (LITETime, ECGFounder) are always built with
+  `n_jobs=None` regardless of the `n_jobs` argument, and through
+  `cached_classifier_factory` so the ~16
   quantifier recipes built on it share one fit cache instead of each
   independently refitting the (expensive) deep model per CV fold/OvR
   member -- see `docs/quantifier_registry_audit.md`'s item 13 note and
@@ -271,10 +343,15 @@ def build_registry(classifier_names: list[str],
   classifiers = default_base_classifiers()
   registry = {}
 
+  deep_factories = {
+    'LITETime': lambda: LITETimeClassifier(**(lite_time_kwargs or {})),
+    'ECGFounder': lambda: ECGFounderClassifier(**(ecg_founder_kwargs or {})),
+  }
   for clf_name in classifier_names:
-    if clf_name == 'LITETime':
-      lite_time_factory = lambda: LITETimeClassifier(**(lite_time_kwargs or {}))
-      classifier_factory = cached_classifier_factory(lite_time_factory, cache_id=cache_id)
+    if clf_name in DEEP_CLASSIFIERS:
+      classifier_factory = cached_classifier_factory(
+        deep_factories[clf_name], cache_id=fit_cache_id(cache_id, clf_name),
+      )
       registry.update(build_all_quantifiers(
         clf_name, classifier_factory, cv=cv, n_jobs=None, parallel_backend=parallel_backend,
         include_threshold_family=include_threshold_family,
@@ -328,6 +405,8 @@ def main() -> None:
   output_dir = args.output_dir
   checkpoint_dir = args.checkpoint_dir or os.path.join(output_dir, '_checkpoint')
   use_lite_time = 'LITETime' in args.classifiers
+  use_ecg_founder = 'ECGFounder' in args.classifiers
+  deep_requested = [name for name in DEEP_CLASSIFIERS if name in args.classifiers]
 
   if args.fresh and os.path.exists(checkpoint_dir):
     log(f"=== --fresh given: removing existing checkpoint at {checkpoint_dir} ===")
@@ -357,6 +436,22 @@ def main() -> None:
       'lite_time_n_epochs': args.lite_time_n_epochs,
       'lite_time_batch_size': args.lite_time_batch_size,
     })
+  if use_ecg_founder:
+    run_config.update({
+      # identifies the weights without tying the run to one machine's path
+      'ecg_founder_checkpoint': (os.path.basename(args.ecg_founder_checkpoint)
+                                 if args.ecg_founder_checkpoint else 'huggingface'),
+      'ecg_founder_mode': args.ecg_founder_mode,
+      'ecg_founder_input_fs': args.ecg_founder_input_fs,
+      'ecg_founder_filter': args.ecg_founder_filter,
+    })
+    if args.ecg_founder_mode == 'finetune':
+      run_config.update({
+        'ecg_founder_n_epochs': args.ecg_founder_n_epochs,
+        'ecg_founder_batch_size': args.ecg_founder_batch_size,
+        'ecg_founder_lr': args.ecg_founder_lr,
+        'ecg_founder_validation_fraction': args.ecg_founder_validation_fraction,
+      })
   checkpoint.record_run_config(run_config)
 
   if use_lite_time:
@@ -372,6 +467,19 @@ def main() -> None:
       log(f"XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}")
     _quiet_tensorflow()
 
+  ecg_founder_checkpoint = None
+  if use_ecg_founder:
+    # same fail-fast idea: GPU and pretrained weights (downloading them
+    # if needed) are checked before any data is loaded or anything fitted
+    try:
+      devices = configure_torch_device(args.ecg_founder_device)
+      ecg_founder_checkpoint = resolve_ecg_founder_checkpoint(args.ecg_founder_checkpoint)
+    except (RuntimeError, ImportError, FileNotFoundError) as error:
+      log(f"ERROR: {error}")
+      raise SystemExit(1)
+    log(f"ECGFounder device: {args.ecg_founder_device.upper()} ({', '.join(devices)})")
+    log(f"ECGFounder weights: {ecg_founder_checkpoint} ({args.ecg_founder_mode})")
+
   log(f"=== [1/5] Loading splits from {args.splits_path} ===")
   data = np.load(args.splits_path, allow_pickle=True)
   X_train, y_train = data['X_train'], data['y_train']
@@ -381,9 +489,9 @@ def main() -> None:
 
   log()
   log("=== [2/5] Building quantifier registry ===")
-  if use_lite_time and args.n_jobs not in (None, 1):
-    log(f"  NOTE: --n-jobs={args.n_jobs} is ignored for LITETime (always n_jobs=None) -- "
-        f"see --classifiers' help.")
+  if deep_requested and args.n_jobs not in (None, 1):
+    log(f"  NOTE: --n-jobs={args.n_jobs} is ignored for {'/'.join(deep_requested)} "
+        f"(always n_jobs=None) -- see --classifiers' help.")
   # one fit-cache scope per checkpoint_dir: reruns resuming the same
   # checkpoint reasonably reuse the same scope name (harmless either
   # way, since the cache is in-memory/per-process only -- cross-run
@@ -401,6 +509,24 @@ def main() -> None:
       random_state=args.random_state,
     ),
     cache_id=cache_id,
+    ecg_founder_kwargs=dict(
+      checkpoint_path=ecg_founder_checkpoint,
+      freeze_backbone=args.ecg_founder_mode == 'linear-probe',
+      input_sampling_rate=args.ecg_founder_input_fs,
+      apply_ecgfounder_filter=args.ecg_founder_filter,
+      n_epochs=args.ecg_founder_n_epochs,
+      batch_size=args.ecg_founder_batch_size,
+      learning_rate=args.ecg_founder_lr,
+      validation_fraction=args.ecg_founder_validation_fraction,
+      device=args.ecg_founder_device,
+      # fine-tuning: per-epoch resumable state + finished weights live
+      # next to the experiment checkpoint, so a restart resumes trainings
+      # instead of repeating them (see _ecg_founder's module docstring)
+      training_checkpoint_root=(os.path.join(checkpoint_dir, 'ecg_founder_trainings')
+                                if args.ecg_founder_mode == 'finetune' else None),
+      trust_checkpoint=args.ecg_founder_trust_checkpoint,
+      random_state=args.random_state,
+    ),
   )
   log(f"{len(registry)} quantifiers registered: {sorted(registry.keys())}")
   if checkpoint.fitted_names:
@@ -425,13 +551,16 @@ def main() -> None:
 
   log()
   log("=== [3/5] Fitting all quantifiers on training data ===")
-  if use_lite_time:
-    expected = (args.cv + 1) * (1 + len(np.unique(y_train)))
-    log(f"LITETime: a from-scratch run needs ~{expected} real trainings in total "
-        f"((cv + 1) x (1 + n_classes)); every other LITETime fit reuses one of them. "
-        f"When resuming, quantifiers already in the checkpoint are loaded, but the "
-        f"in-memory fit cache starts empty: the first not-yet-fitted native and OvR "
-        f"quantifier retrain their group's trainings once.")
+  expected = (args.cv + 1) * (1 + len(np.unique(y_train)))
+  for deep_name in deep_requested:
+    log(f"{deep_name}: a from-scratch run needs ~{expected} real trainings in total "
+        f"((cv + 1) x (1 + n_classes)); every other {deep_name} fit reuses one of them.")
+  if use_lite_time or (use_ecg_founder and args.ecg_founder_mode == 'linear-probe'):
+    log("When resuming, quantifiers already in the checkpoint are loaded, but the "
+        "in-memory fit cache starts empty: the first not-yet-fitted native and OvR "
+        "quantifier retrain their group's trainings once"
+        + (" (ECGFounder fine-tuning resumes from its own training checkpoints instead)."
+           if use_ecg_founder and args.ecg_founder_mode == 'finetune' else "."))
   fitted = {}
   n_total = len(registry)
   for i, (name, quantifier) in enumerate(registry.items(), start=1):
@@ -441,8 +570,9 @@ def main() -> None:
       log(f"  {tag}: loaded from checkpoint")
       continue
 
-    is_lite_time = name.startswith('LITETime-')
-    before = fit_cache_stats(cache_id) if is_lite_time else None
+    deep_name = next((d for d in deep_requested if name.startswith(f'{d}-')), None)
+    deep_cache_id = fit_cache_id(cache_id, deep_name) if deep_name else None
+    before = fit_cache_stats(deep_cache_id) if deep_name else None
     log(f"  {tag}: fitting...")
     start = time.time()
     quantifier.fit(X_train, y_train)
@@ -451,9 +581,9 @@ def main() -> None:
     fitted[name] = quantifier
 
     detail = ""
-    if is_lite_time:
-      after = fit_cache_stats(cache_id)
-      detail = (f" ({after['trainings'] - before['trainings']} new LITETime trainings, "
+    if deep_name:
+      after = fit_cache_stats(deep_cache_id)
+      detail = (f" ({after['trainings'] - before['trainings']} new {deep_name} trainings, "
                 f"{after['hits'] - before['hits']} reused from cache; "
                 f"{after['trainings']} trained so far)")
     log(f"  {tag}: fit in {format_duration(elapsed)}{detail}")

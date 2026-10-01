@@ -84,6 +84,17 @@ deep-cpu = [
     "tensorflow-cpu>=2.16; sys_platform != 'darwin'",
     "tensorflow>=2.16; sys_platform == 'darwin'",
 ]
+# ECGFounder (Fase 4): PyTorch + huggingface_hub (pretrained weights are
+# downloaded from the PKUDigitalHealth/ECGFounder Hugging Face repo).
+# PyPI's default Linux torch wheel targets a recent CUDA (CUDA 13 for
+# recent releases), which needs a recent NVIDIA driver; with an older driver install
+# torch from https://download.pytorch.org/whl/cu126 (or similar) first.
+# Independent of `deep`: torch's CUDA wheels (cu13) don't conflict with
+# TensorFlow's (cu12), so both extras can share one environment.
+ecgfounder = [
+    "torch>=2.5",
+    "huggingface_hub>=0.20",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

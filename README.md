@@ -73,6 +73,23 @@ pip install -U "nvidia-cuda-nvcc-cu12>=12.6.3,<13"
 export PATH="$(python -c 'import nvidia.cuda_nvcc as m; print(list(m.__path__)[0])')/bin:$PATH"
 ```
 
+#### ECGFounder (`.[ecgfounder]`)
+
+`pip install -e ".[ecgfounder]"` adds PyTorch and `huggingface_hub` for
+`ECGFounderClassifier` (the single-lead ECGFounder foundation model,
+Li et al., NEJM AI 2025). The pretrained `1_lead_ECGFounder.pth` (370 MB)
+is downloaded once from Hugging Face on first use, or pass a local copy
+with `--ecg-founder-checkpoint` / `ECGFOUNDER_CHECKPOINT`. Check the GPU
+is usable before a long run:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+```
+
+If that prints `False` with a CUDA version, the NVIDIA driver is likely
+older than that CUDA build needs: reinstall torch from the matching index,
+e.g. `pip install torch --index-url https://download.pytorch.org/whl/cu126`.
+
 `scripts/run_multiclass_experiment.py` trains LITETime on the GPU by
 default and stops right away, with a diagnosis, if TensorFlow sees none
 (`--lite-time-device cpu` trains on the CPU on purpose). The CPU-only

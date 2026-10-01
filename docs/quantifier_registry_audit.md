@@ -142,3 +142,20 @@ that XLA was using `ptxas` 12.4 (CUDA <= 12.6.2). The script now sets
 (XLA uses cuBLAS for those small matrix multiplications instead; an
 explicit setting in the environment is respected). Upgrading `ptxas` to
 >= 12.6.3 is still recommended -- see the README's `deep` extra section.
+
+**Update (Fase 4, ECGFounder)**: `ECGFounderClassifier` (single-lead
+ECGFounder, Net1D vendored from the official repo under MIT) is wired into
+`run_multiclass_experiment.py` as `--classifiers ECGFounder`, through the
+same fit cache as LITETime but in its **own cache scope**
+(`<checkpoint-dir>::<classifier>`): the cache keys on the training data
+alone, so two deep classifiers fitting the same subset must never share
+one. Two modes: `--ecg-founder-mode linear-probe` (default; frozen
+backbone + logistic regression on its 1024-d features) and `finetune`
+(full fine-tuning, official notebook hyperparameters, best epoch by
+validation loss, per-epoch resumable training state + finished weights
+under `<checkpoint-dir>/ecg_founder_trainings/` -- item 16). Inputs are
+resampled 360 -> 500 Hz, filtered with ECGFounder's own filter chain and
+z-scored per beat; see `_ecg_founder.py`'s module docstring for the two
+deliberate deviations from the official preprocessing (1 s beat windows,
+not padded to 10 s; filtering per window rather than per record) and the
+lead mismatch (pretrained on lead I, MIT-BIH is MLII).

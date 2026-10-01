@@ -1,6 +1,10 @@
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
 from ecg_quantification.quantifiers._label_encoded_quantifier import LabelEncodedQuantifier
-# from ecg_quantification.quantifiers._ecg_founder import ECGFounderClassifier
+from ecg_quantification.quantifiers._ecg_founder import (
+  ECGFounderClassifier,
+  configure_torch_device,
+  resolve_ecg_founder_checkpoint,
+)
 from ecg_quantification.quantifiers._lite_time import LITETimeClassifier, configure_tensorflow_device
 from ecg_quantification.quantifiers._cached_classifier import (
   CachedFitClassifier,
@@ -20,7 +24,9 @@ from ecg_quantification.quantifiers._registry import (
 __all__ = [
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
-  # 'ECGFounderClassifier',
+  'ECGFounderClassifier',
+  'configure_torch_device',
+  'resolve_ecg_founder_checkpoint',
   'LITETimeClassifier',
   'configure_tensorflow_device',
   'CachedFitClassifier',
