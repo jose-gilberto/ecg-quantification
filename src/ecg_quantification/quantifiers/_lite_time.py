@@ -254,6 +254,107 @@ def _load_lite_time(n_classifiers: int = 5,
   return _AeonLITETimeClassifier(**build_kwargs)
 
 
+# Oldest CUDA `ptxas` XLA does not warn about: <= 12.6.2 "miscompile
+# certain edge cases around clamping" (XLA's own start-up warning), and in
+# practice also fail to compile some of the kernels XLA generates
+# ("Autotuner could not compile any configs for HLO ...").
+MIN_SAFE_PTXAS_VERSION = (12, 6, 3)
+
+
+def pip_cuda_nvcc_dir() -> str | None:
+  """Root of the pip-installed CUDA compiler (`nvidia-cuda-nvcc-cu12`, a
+  dependency of `tensorflow[and-cuda]`), i.e. the directory holding
+  `bin/ptxas` and `nvvm/libdevice`, or None if it is not installed."""
+  import importlib.util
+  try:
+    spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+  except (ImportError, ValueError):
+    return None
+  if spec is None:
+    return None
+  for location in spec.submodule_search_locations or []:
+    if os.path.isfile(os.path.join(location, "bin", "ptxas")):
+      return location
+  return None
+
+
+def ptxas_version(ptxas_path: str) -> tuple | None:
+  """`(major, minor, patch)` reported by `ptxas --version`, or None if it
+  cannot be run/parsed."""
+  import re
+  import subprocess
+  if not ptxas_path:
+    return None
+  try:
+    output = subprocess.run(
+      [ptxas_path, "--version"], capture_output=True, text=True, timeout=30,
+    ).stdout
+  except (OSError, subprocess.SubprocessError):
+    return None
+  match = re.search(r"V(\d+)\.(\d+)\.(\d+)", output)
+  return tuple(int(part) for part in match.groups()) if match else None
+
+
+def configure_xla_ptxas(environ=None) -> str | None:
+  """Points XLA at the pip-installed CUDA compiler and returns the path
+  of the `ptxas` it is expected to use.
+
+  XLA (which Keras uses to compile LITETime's training step on the GPU)
+  compiles its kernels with whatever `ptxas` it finds, and an older one
+  found first -- a system CUDA under /usr/local, or a conda `cuda-nvcc`
+  package on PATH -- breaks GPU training ("Autotuner could not compile
+  any configs for HLO ..."). Unless `XLA_FLAGS` already names a
+  `--xla_gpu_cuda_data_dir`, this adds one pointing at
+  `nvidia-cuda-nvcc-cu12` (installed with `tensorflow[and-cuda]`) and puts
+  its `bin/` first on PATH. Must run before XLA's first compilation.
+
+  Parameters
+  ----------
+  environ : mapping, default = None
+    Environment to read/update; `os.environ` when None.
+
+  Returns
+  -------
+  ptxas : str or None
+    The `ptxas` XLA should use (from `--xla_gpu_cuda_data_dir`, else the
+    first on PATH), or None if none is found.
+  """
+  import re
+  import shutil
+  environ = os.environ if environ is None else environ
+  flags = environ.get("XLA_FLAGS", "")
+  match = re.search(r"--xla_gpu_cuda_data_dir=(\S+)", flags)
+  if match:
+    data_dir = match.group(1)
+  else:
+    data_dir = pip_cuda_nvcc_dir()
+    if data_dir:
+      environ["XLA_FLAGS"] = f"{flags} --xla_gpu_cuda_data_dir={data_dir}".strip()
+  if data_dir:
+    bin_dir = os.path.join(data_dir, "bin")
+    environ["PATH"] = bin_dir + os.pathsep + environ.get("PATH", "")
+    ptxas = os.path.join(bin_dir, "ptxas")
+    return ptxas if os.path.isfile(ptxas) else None
+  return shutil.which("ptxas", path=environ.get("PATH"))
+
+
+def disable_keras_xla() -> None:
+  """Makes Keras resolve `jit_compile="auto"` to False in this process.
+
+  aeon compiles LITETime with Keras' default `jit_compile="auto"`, which
+  on a GPU means XLA. Without XLA, training runs as TensorFlow's regular,
+  precompiled GPU kernels: no `ptxas` involved, usually somewhat slower.
+  The escape hatch when the machine's `ptxas` cannot be fixed.
+  """
+  from keras.src.trainers import trainer
+  if not hasattr(trainer.Trainer, "_resolve_auto_jit_compile"):
+    raise RuntimeError(
+      "This Keras version has no Trainer._resolve_auto_jit_compile; cannot disable "
+      "XLA for LITETime. Fix ptxas instead (see the README's `deep` extra section)."
+    )
+  trainer.Trainer._resolve_auto_jit_compile = lambda self: False
+
+
 def configure_tensorflow_device(device: str = "gpu", memory_growth: bool = True) -> list[str]:
   """Pins TensorFlow (and therefore every `LITETimeClassifier` built in
   this process) to the GPU or the CPU, failing fast instead of silently

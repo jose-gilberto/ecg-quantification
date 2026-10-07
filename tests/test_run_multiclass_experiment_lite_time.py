@@ -212,3 +212,33 @@ def test_script_disables_xla_triton_gemm_unless_set_explicitly():
   LITETime runs above then also prove TensorFlow's XLA accepts the flag:
   an unknown flag in XLA_FLAGS aborts the process at first compilation."""
   assert '--xla_gpu_enable_triton_gemm' in os.environ.get('XLA_FLAGS', '')
+
+
+class TestCheckXlaPtxas:
+  """The pre-training ptxas check behind --lite-time-xla (GPU runs)."""
+
+  def _fake(self, tmp_path, version):
+    path = tmp_path / "ptxas"
+    major, minor, _ = version.split(".")
+    path.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {major}.{minor}, V{version}'\n")
+    path.chmod(0o755)
+    return str(path)
+
+  def test_old_ptxas_stops_the_run_with_both_fixes(self, tmp_path):
+    ok, message = run_experiment.check_xla_ptxas(self._fake(tmp_path, "12.4.131"), True)
+    assert not ok
+    assert "12.4.131" in message
+    assert 'pip install -U "nvidia-cuda-nvcc-cu12>=12.6.3,<13"' in message
+    assert "--no-lite-time-xla" in message
+
+  def test_recent_ptxas_is_fine(self, tmp_path):
+    ok, message = run_experiment.check_xla_ptxas(self._fake(tmp_path, "12.9.86"), True)
+    assert ok and "12.9.86" in message
+
+  def test_old_ptxas_is_irrelevant_without_xla(self, tmp_path):
+    ok, message = run_experiment.check_xla_ptxas(self._fake(tmp_path, "12.4.131"), False)
+    assert ok and "XLA disabled" in message
+
+  def test_unknown_ptxas_only_warns(self):
+    ok, message = run_experiment.check_xla_ptxas(None, True)
+    assert ok and message.startswith("WARNING")

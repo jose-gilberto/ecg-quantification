@@ -159,3 +159,11 @@ z-scored per beat; see `_ecg_founder.py`'s module docstring for the two
 deliberate deviations from the official preprocessing (1 s beat windows,
 not padded to 10 s; filtering per window rather than per record) and the
 lead mismatch (pretrained on lead I, MIT-BIH is MLII).
+
+**Update (XLA/ptxas, follow-up)**: disabling Triton GEMM only moved the
+failure to the next kernel the old `ptxas` 12.4 could not compile (an
+ArgMax reduce fusion, a few trainings in). The script now points XLA at
+the pip-installed `ptxas` (`--xla_gpu_cuda_data_dir`, from
+`nvidia-cuda-nvcc-cu12`), checks its version (>= 12.6.3) before training
+and stops with the fix if it is older; `--no-lite-time-xla` trains without
+XLA as an escape hatch.

@@ -304,3 +304,81 @@ class TestConfigureTensorflowDevice:
     expected = "CPU-only" if not tf.test.is_built_with_cuda() else "sees no GPU"
     with pytest.raises(RuntimeError, match=expected):
       configure_tensorflow_device("gpu")
+
+
+def _fake_ptxas(directory, version="12.4.131"):
+  """A stand-in `ptxas` script printing a real-looking version banner."""
+  os.makedirs(directory, exist_ok=True)
+  path = os.path.join(directory, "ptxas")
+  major, minor, _ = version.split(".")
+  with open(path, "w") as handle:
+    handle.write(
+      "#!/bin/sh\n"
+      "echo 'ptxas: NVIDIA (R) Ptx optimizing assembler'\n"
+      f"echo 'Cuda compilation tools, release {major}.{minor}, V{version}'\n"
+    )
+  os.chmod(path, 0o755)
+  return path
+
+
+class TestXlaPtxas:
+  """XLA must compile LITETime's GPU kernels with a recent enough ptxas:
+  the pip one installed with tensorflow[and-cuda] is preferred over an
+  older system/conda CUDA found first (the item 14 GPU crashes)."""
+
+  def test_ptxas_version_parses_the_banner(self, tmp_path):
+    from ecg_quantification.quantifiers._lite_time import ptxas_version
+    assert ptxas_version(_fake_ptxas(str(tmp_path / "bin"))) == (12, 4, 131)
+    assert ptxas_version(str(tmp_path / "missing")) is None
+    assert ptxas_version(None) is None
+
+  def test_finds_pip_cuda_nvcc_namespace_package(self, tmp_path, monkeypatch):
+    import importlib
+    import sys
+    from ecg_quantification.quantifiers._lite_time import pip_cuda_nvcc_dir
+    root = tmp_path / "site"
+    _fake_ptxas(str(root / "nvidia" / "cuda_nvcc" / "bin"), "12.9.86")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.delitem(sys.modules, "nvidia.cuda_nvcc", raising=False)
+    importlib.invalidate_caches()
+    assert pip_cuda_nvcc_dir() == str(root / "nvidia" / "cuda_nvcc")
+
+  def test_points_xla_at_pip_ptxas_and_prepends_path(self, tmp_path, monkeypatch):
+    from ecg_quantification.quantifiers import _lite_time
+    data_dir = str(tmp_path / "cuda_nvcc")
+    ptxas = _fake_ptxas(os.path.join(data_dir, "bin"), "12.9.86")
+    monkeypatch.setattr(_lite_time, "pip_cuda_nvcc_dir", lambda: data_dir)
+    environ = {"XLA_FLAGS": "--xla_gpu_enable_triton_gemm=false", "PATH": "/usr/bin"}
+    assert _lite_time.configure_xla_ptxas(environ) == ptxas
+    assert environ["XLA_FLAGS"] == f"--xla_gpu_enable_triton_gemm=false --xla_gpu_cuda_data_dir={data_dir}"
+    assert environ["PATH"].split(os.pathsep)[0] == os.path.join(data_dir, "bin")
+
+  def test_explicit_cuda_data_dir_wins(self, tmp_path, monkeypatch):
+    from ecg_quantification.quantifiers import _lite_time
+    mine = str(tmp_path / "my_cuda")
+    ptxas = _fake_ptxas(os.path.join(mine, "bin"))
+    monkeypatch.setattr(_lite_time, "pip_cuda_nvcc_dir", lambda: "/elsewhere")
+    environ = {"XLA_FLAGS": f"--xla_gpu_cuda_data_dir={mine}", "PATH": ""}
+    assert _lite_time.configure_xla_ptxas(environ) == ptxas
+    assert "/elsewhere" not in environ["XLA_FLAGS"]
+
+  def test_without_pip_package_falls_back_to_path(self, tmp_path, monkeypatch):
+    from ecg_quantification.quantifiers import _lite_time
+    ptxas = _fake_ptxas(str(tmp_path / "conda" / "bin"))
+    monkeypatch.setattr(_lite_time, "pip_cuda_nvcc_dir", lambda: None)
+    environ = {"PATH": str(tmp_path / "conda" / "bin")}
+    assert _lite_time.configure_xla_ptxas(environ) == ptxas
+    assert "XLA_FLAGS" not in environ
+
+  def test_disable_keras_xla(self):
+    import keras
+    from keras.src.trainers import trainer
+    from ecg_quantification.quantifiers._lite_time import disable_keras_xla
+    original = trainer.Trainer._resolve_auto_jit_compile
+    try:
+      disable_keras_xla()
+      model = keras.Sequential([keras.Input((3,)), keras.layers.Dense(2)])
+      model.compile(optimizer="adam", loss="mse")  # jit_compile="auto", like aeon
+      assert model.jit_compile is False
+    finally:
+      trainer.Trainer._resolve_auto_jit_compile = original

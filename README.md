@@ -57,21 +57,22 @@ pip install -e ".[test,deep]"
 python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
 ```
 
-If a GPU run prints `Invoking ptxas with version 12.x ... Please upgrade
-to CUDA 12.6.3 or newer` and/or fails with `Autotuner could not compile
-any configs for HLO ... __triton_gemm`, XLA picked up an old `ptxas`
-(typically a system or conda CUDA found before the pip one).
-`run_multiclass_experiment.py` already works around the crash by setting
-`XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` (unless you set that flag
-yourself), but the warning is about ptxas miscompiling some edge cases,
-so upgrade it too:
+XLA (which Keras uses to compile LITETime's GPU training) needs a CUDA
+`ptxas` >= 12.6.3. An older one found first -- a system CUDA under
+`/usr/local`, or a conda `cuda-nvcc` -- fails with `Autotuner could not
+compile any configs for HLO ...` (on a matrix multiplication, an ArgMax,
+...) and, per XLA's own warning, miscompiles some edge cases.
+`run_multiclass_experiment.py` therefore points XLA at the pip-installed
+`ptxas` (`nvidia-cuda-nvcc-cu12`, part of `tensorflow[and-cuda]`) via
+`--xla_gpu_cuda_data_dir`, and checks its version before any training,
+stopping right away if it is too old. Fix:
 
 ```bash
-which -a ptxas; ptxas --version        # which one is found first?
 pip install -U "nvidia-cuda-nvcc-cu12>=12.6.3,<13"
-# make the pip one win, if an older one is still found first:
-export PATH="$(python -c 'import nvidia.cuda_nvcc as m; print(list(m.__path__)[0])')/bin:$PATH"
 ```
+
+or, if that is not possible, train without XLA (`--no-lite-time-xla`:
+TensorFlow's regular GPU kernels, no `ptxas` involved, somewhat slower).
 
 #### ECGFounder (`.[ecgfounder]`)
 

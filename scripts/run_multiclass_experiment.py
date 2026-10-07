@@ -106,6 +106,18 @@ if _XLA_TRITON_GEMM_FLAG not in os.environ.get('XLA_FLAGS', ''):
     os.environ.get('XLA_FLAGS', '') + f' {_XLA_TRITON_GEMM_FLAG}=false'
   ).strip()
 
+# The Triton GEMM flag alone only sidesteps the *first* kernel an old
+# ptxas cannot compile (the next one, e.g. an ArgMax reduce fusion, then
+# fails the same way). The real fix is the ptxas itself: point XLA at the
+# one pip installed with tensorflow[and-cuda] (nvidia-cuda-nvcc-cu12)
+# instead of whatever older CUDA is found first. main() then checks its
+# version before any training (see check_xla_ptxas). Importing
+# ecg_quantification here does not load TensorFlow.
+from ecg_quantification.quantifiers._lite_time import (  # noqa: E402
+  MIN_SAFE_PTXAS_VERSION, configure_xla_ptxas, disable_keras_xla, ptxas_version,
+)
+XLA_PTXAS = configure_xla_ptxas()
+
 import numpy as np
 
 from ecg_quantification import (
@@ -173,6 +185,33 @@ def _attach_package_logging() -> None:
   if not any(getattr(h, 'is_run_multiclass_experiment_handler', False)
              for h in package_logger.handlers):
     package_logger.addHandler(_LogHandler())
+
+
+def check_xla_ptxas(ptxas_path: str | None, xla_enabled: bool) -> tuple[bool, str]:
+  """Decides, before any LITETime GPU training, whether XLA can be used:
+  `(ok, message)`. Not ok when XLA is enabled and its `ptxas` is older
+  than MIN_SAFE_PTXAS_VERSION -- such a ptxas fails to compile some of
+  XLA's kernels (and XLA warns it miscompiles others), so the run would
+  crash minutes or hours in, or produce suspect numbers."""
+  if not xla_enabled:
+    return True, "XLA disabled for LITETime (--no-lite-time-xla): regular TensorFlow GPU kernels."
+  version = ptxas_version(ptxas_path)
+  if version is None:
+    return True, (f"WARNING: could not determine the ptxas XLA will use ({ptxas_path or 'none found'}); "
+                  f"if training fails with 'Autotuner could not compile any configs', see the "
+                  f"README's `deep` extra section or pass --no-lite-time-xla.")
+  shown = '.'.join(map(str, version))
+  if version < MIN_SAFE_PTXAS_VERSION:
+    minimum = '.'.join(map(str, MIN_SAFE_PTXAS_VERSION))
+    return False, (
+      f"XLA would compile LITETime's GPU kernels with ptxas {shown} ({ptxas_path}), older than "
+      f"{minimum}: it fails to compile some of them ('Autotuner could not compile any configs "
+      f"for HLO ...') and miscompiles others. Fix it with\n"
+      f"    pip install -U \"nvidia-cuda-nvcc-cu12>={minimum},<13\"\n"
+      f"(this script then points XLA at it automatically), or train without XLA: "
+      f"--no-lite-time-xla."
+    )
+  return True, f"XLA ptxas: {ptxas_path} ({shown})"
 
 
 def _quiet_tensorflow() -> None:
@@ -249,6 +288,12 @@ def parse_args() -> argparse.Namespace:
                             "falling back to a much slower CPU run; 'cpu' hides any GPU. Not "
                             "part of the checkpoint's run config, so a run can be resumed on "
                             "the other device.")
+  parser.add_argument('--lite-time-xla', action=argparse.BooleanOptionalAction, default=True,
+                       help="Compile LITETime's GPU training with XLA (Keras' default, faster). "
+                            "Requires a CUDA ptxas >= 12.6.3, checked before training. "
+                            "--no-lite-time-xla uses TensorFlow's regular GPU kernels instead "
+                            "(no ptxas needed, usually somewhat slower). Not part of the run "
+                            "config.")
 
   parser.add_argument('--ecg-founder-checkpoint', type=str, default=None,
                        help="Local 1_lead_ECGFounder.pth (only used if 'ECGFounder' is in "
@@ -464,7 +509,15 @@ def main() -> None:
       raise SystemExit(1)
     log(f"LITETime device: {args.lite_time_device.upper()} ({', '.join(devices)})")
     if args.lite_time_device == 'gpu':
-      log(f"XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}")
+      ok, message = check_xla_ptxas(XLA_PTXAS, args.lite_time_xla)
+      if not ok:
+        log(f"ERROR: {message}")
+        raise SystemExit(1)
+      log(message)
+      if args.lite_time_xla:
+        log(f"XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}")
+      else:
+        disable_keras_xla()
     _quiet_tensorflow()
 
   ecg_founder_checkpoint = None
