@@ -33,6 +33,7 @@ EXPECTED_PUBLIC_SYMBOLS = {
   'build_all_quantifiers',
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
+  'DiscretizedQuantifier',
   'ECGFounderClassifier',
   'configure_torch_device',
   'resolve_ecg_founder_checkpoint',

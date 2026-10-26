@@ -64,13 +64,18 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from quack.quantifiers import (
   CC, PCC, ACC, PACC,
   MedianSweep, X, T50, Max,
-  HDy, FM, FormanMM, DyS, GAC, GPAC,
-  ReadMe, HDx,
+  HDy, FormanMM, DyS,
   EM, CDE,
   ED,
 )
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
 from ecg_quantification.quantifiers._label_encoded_quantifier import LabelEncodedQuantifier
+# multiclass-safe subclasses of quack's mixture quantifiers (same names and
+# parameters): quack's solver fallback is binary-only and crashes on the
+# 5-class problem whenever CVXPY fails -- see _robust_mixture's docstring
+from ecg_quantification.quantifiers._robust_mixture import (
+  GAC, GPAC, FM, HDx, ReadMe, DiscretizedQuantifier,
+)
 
 
 def default_base_classifiers() -> dict[str, Callable]:
@@ -161,16 +166,41 @@ def build_multiclass_quantifiers(classifier_factory: Callable,
 
 
 def build_feature_space_quantifiers(n_jobs: int = None,
-                                    parallel_backend: str = "loky") -> dict[str, object]:
+                                    parallel_backend: str = "loky",
+                                    hdx_bins: int = 8,
+                                    readme_bins: int = 2,
+                                    random_state: int = None) -> dict[str, object]:
   """Builds classifier-free, feature-space multiclass quantifiers
   (operate directly on X; no `classifier=` parameter).
 
   Not part of the per-classifier grid, since they don't take a base
   classifier — evaluated once, independent of `default_base_classifiers()`.
+
+  HDx and ReadMe match *exact* feature values, so they only make sense on
+  discrete features: on continuous beat samples every value is unique,
+  the test frequencies are all zero and the problem degenerates (see
+  `_robust_mixture`'s module docstring). Both are therefore wrapped in
+  `DiscretizedQuantifier` (quantile bins per feature, fit on the training
+  data), and the bin count is part of their name (`HDx_8bins`,
+  `ReadMe_2bins`) so results/checkpoints from different discretizations
+  never mix. ReadMe defaults to 2 bins: it matches whole patterns of
+  several features at once, which become too sparse to ever match a test
+  beat with many bins (the original method works on binary features).
+  ED works on continuous features directly and is unchanged.
+
+  Parameters
+  ----------
+  hdx_bins, readme_bins : int, default = 8, 2
+    Quantile bins per feature for HDx and ReadMe.
+  random_state : int, default = None
+    Seeds ReadMe's random feature subspaces.
   """
   return {
-    'HDx': HDx(),
-    'ReadMe': ReadMe(n_jobs=n_jobs, parallel_backend=parallel_backend),
+    f'HDx_{hdx_bins}bins': DiscretizedQuantifier(HDx(), n_bins=hdx_bins),
+    f'ReadMe_{readme_bins}bins': DiscretizedQuantifier(
+      ReadMe(n_jobs=n_jobs, parallel_backend=parallel_backend, random_state=random_state),
+      n_bins=readme_bins,
+    ),
     'ED': ED(n_jobs=n_jobs, parallel_backend=parallel_backend),
   }
 

@@ -167,3 +167,25 @@ the pip-installed `ptxas` (`--xla_gpu_cuda_data_dir`, from
 `nvidia-cuda-nvcc-cu12`), checks its version (>= 12.6.3) before training
 and stops with the fix if it is older; `--no-lite-time-xla` trains without
 XLA as an escape hatch.
+
+**Update (feature-space quantifiers + multiclass solver fallback)**: the
+first full run crashed evaluating HDx (`shapes (18506640,5) and (2,) not
+aligned`). Two causes, both fixed in `quantifiers/_robust_mixture.py`
+without patching quack:
+
+- HDx and ReadMe match *exact* feature values, i.e. they assume discrete
+  features. On continuous z-scored beats HDx's conditional matrix had one
+  row per distinct training value (360 x ~51k) and no test value ever
+  matched one: an all-zero test vector, a degenerate problem, a failed
+  solver. They now run on quantile-binned features (`DiscretizedQuantifier`,
+  bins fit on training data only), registered as `HDx_<n>bins` (default
+  8) and `ReadMe_<n>bins` (default 2 -- ReadMe matches whole patterns of
+  ~9 features, too sparse with many bins; the original method uses binary
+  features). The bin count is in the name, so an older checkpoint's raw
+  `HDx` entry is simply ignored on resume.
+- quack's fallback when CVXPY fails is a Golden Section Search over
+  `[p, 1 - p]`, binary-only. GAC, GPAC, FM, HDx and ReadMe's sub-models
+  now use subclasses that, on > 2 classes, retry with SCS and then
+  minimize quack's own distance over the simplex (SLSQP). Binary problems
+  are unchanged. Already-fitted GAC/GPAC/FM in a checkpoint keep quack's
+  classes until refit (they had evaluated without solver failures).

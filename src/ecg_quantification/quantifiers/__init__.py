@@ -1,5 +1,6 @@
 from ecg_quantification.quantifiers._one_vs_rest import OneVsRestQuantifier
 from ecg_quantification.quantifiers._label_encoded_quantifier import LabelEncodedQuantifier
+from ecg_quantification.quantifiers._robust_mixture import DiscretizedQuantifier
 from ecg_quantification.quantifiers._ecg_founder import (
   ECGFounderClassifier,
   configure_torch_device,
@@ -24,6 +25,7 @@ from ecg_quantification.quantifiers._registry import (
 __all__ = [
   'OneVsRestQuantifier',
   'LabelEncodedQuantifier',
+  'DiscretizedQuantifier',
   'ECGFounderClassifier',
   'configure_torch_device',
   'resolve_ecg_founder_checkpoint',

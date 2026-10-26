@@ -260,6 +260,12 @@ def parse_args() -> argparse.Namespace:
                             "docs/quantifier_registry_audit.md).")
   parser.add_argument('--include-feature-space', action=argparse.BooleanOptionalAction, default=True,
                        help="Also evaluate classifier-free quantifiers (HDx, ReadMe, ED).")
+  parser.add_argument('--hdx-bins', type=int, default=8,
+                       help="Quantile bins per feature for HDx, which needs discrete features "
+                            "(registered as 'HDx_<n>bins').")
+  parser.add_argument('--readme-bins', type=int, default=2,
+                       help="Quantile bins per feature for ReadMe, which matches whole "
+                            "patterns of several features (registered as 'ReadMe_<n>bins').")
 
   parser.add_argument('--cv', type=int, default=10,
                        help="Cross-validation folds for calibrated quantifiers.")
@@ -349,7 +355,8 @@ def build_registry(classifier_names: list[str],
                    include_threshold_family: bool = False,
                    lite_time_kwargs: dict = None,
                    cache_id: str = None,
-                   ecg_founder_kwargs: dict = None) -> dict[str, object]:
+                   ecg_founder_kwargs: dict = None,
+                   feature_space_kwargs: dict = None) -> dict[str, object]:
   """Assembles the full quantifier registry to evaluate: every
   classifier x quantifier combination, plus classifier-free feature-space
   quantifiers if requested.
@@ -372,6 +379,9 @@ def build_registry(classifier_names: list[str],
   ecg_founder_kwargs : dict, default = None
     Forwarded to `ECGFounderClassifier(...)` when `'ECGFounder'` is in
     `classifier_names`. Ignored otherwise.
+  feature_space_kwargs : dict, default = None
+    Forwarded to `build_feature_space_quantifiers(...)` (`hdx_bins`,
+    `readme_bins`, `random_state`) when `include_feature_space`.
 
   Notes
   -----
@@ -408,7 +418,9 @@ def build_registry(classifier_names: list[str],
       ))
 
   if include_feature_space:
-    registry.update(build_feature_space_quantifiers(n_jobs=n_jobs, parallel_backend=parallel_backend))
+    registry.update(build_feature_space_quantifiers(
+      n_jobs=n_jobs, parallel_backend=parallel_backend, **(feature_space_kwargs or {}),
+    ))
 
   return registry
 
@@ -562,6 +574,11 @@ def main() -> None:
       random_state=args.random_state,
     ),
     cache_id=cache_id,
+    # the bin counts are part of HDx/ReadMe's registry names, so they need
+    # no run-config entry: a different value is simply a new quantifier
+    feature_space_kwargs=dict(
+      hdx_bins=args.hdx_bins, readme_bins=args.readme_bins, random_state=args.random_state,
+    ),
     ecg_founder_kwargs=dict(
       checkpoint_path=ecg_founder_checkpoint,
       freeze_backbone=args.ecg_founder_mode == 'linear-probe',

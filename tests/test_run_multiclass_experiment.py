@@ -181,3 +181,32 @@ def test_interruption_partway_through_bag_sizes_only_redoes_the_missing_ones(tmp
   captured = capsys.readouterr()
 
   assert captured.out.count("already evaluated for bag_size=20") == 16
+
+
+def test_feature_space_quantifiers_run_discretized_and_resume_past_an_old_raw_hdx(tmp_path, splits_path, capsys):
+  """HDx/ReadMe now run on binned features under names carrying the bin
+  count -- so a checkpoint from before (holding a fitted raw 'HDx', which
+  crashed the real run) resumes without loading or evaluating it."""
+  from quack.quantifiers import HDx as QuackHDx
+  from ecg_quantification import ExperimentCheckpoint
+
+  output_dir = str(tmp_path / "output")
+  checkpoint_dir = str(tmp_path / "checkpoint")
+  argv = ['--include-feature-space', '--hdx-bins', '4', '--readme-bins', '2']
+
+  # an earlier run's checkpoint: same run config, plus a fitted raw HDx
+  _run(splits_path, output_dir, checkpoint_dir, extra_argv=argv)
+  data = np.load(splits_path, allow_pickle=True)
+  ExperimentCheckpoint(checkpoint_dir).save_fitted('HDx', QuackHDx().fit(data['X_train'], data['y_train']))
+  capsys.readouterr()
+
+  _run(splits_path, output_dir, checkpoint_dir, extra_argv=argv)
+  out = capsys.readouterr().out
+  assert "HDx_4bins: loaded from checkpoint" in out
+  assert "] HDx:" not in out
+
+  summary = pd.read_csv(os.path.join(output_dir, 'summary_table.csv'))
+  names = set(summary['quantifier'])
+  assert {'HDx_4bins', 'ReadMe_2bins', 'ED'} <= names
+  assert 'HDx' not in names
+  assert summary.loc[summary['quantifier'].isin(['HDx_4bins', 'ReadMe_2bins', 'ED']), 'mae_mean'].notna().all()
