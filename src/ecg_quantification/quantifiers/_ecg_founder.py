@@ -218,22 +218,35 @@ def resolve_ecg_founder_checkpoint(checkpoint_path: str = None) -> str:
   return hf_hub_download(repo_id=HF_REPO_ID, filename=HF_SINGLE_LEAD_FILENAME)
 
 
-def _numpy_safe_globals() -> list:
-  """numpy objects that may appear in a training checkpoint's metadata
-  (e.g. a numpy-float `val_auroc`), allowlisted for
-  `torch.load(weights_only=True)` -- plain data, no code execution."""
-  safe = [np.dtype]
-  for module_name in ("numpy._core.multiarray", "numpy.core.multiarray"):
-    try:
-      module = __import__(module_name, fromlist=["scalar"])
-      safe.append(module.scalar)
-      break
-    except (ImportError, AttributeError):
-      continue
-  for name in ("Float64DType", "Float32DType", "Int64DType", "Int32DType"):
+def _numpy_safe_globals(with_legacy_names: bool = True) -> list:
+  """numpy objects that may appear in a checkpoint's metadata or optimizer
+  state (e.g. a numpy-float `val_auroc`, or a small array), allowlisted
+  for `torch.load(weights_only=True)` -- they only rebuild plain data
+  (scalars, dtypes, arrays), they cannot execute arbitrary code.
+
+  `torch.load` matches allowlisted globals by the dotted name stored in the
+  file. A checkpoint pickled under numpy 1.x -- the official ECGFounder
+  release is one -- stores `numpy.core.multiarray.scalar`, while under
+  numpy 2.x the very same function reports `numpy._core.multiarray.scalar`.
+  So each one is also registered under its numpy 1.x name, using torch's
+  `(object, "name in the file")` form (`with_legacy_names=False` drops
+  those, for PyTorch versions that don't accept that form).
+  """
+  try:
+    from numpy._core import multiarray
+  except ImportError:  # numpy 1.x
+    from numpy.core import multiarray
+
+  safe = [np.dtype, np.ndarray, multiarray.scalar, multiarray._reconstruct]
+  for name in ("Float64DType", "Float32DType", "Int64DType", "Int32DType", "BoolDType"):
     dtype_class = getattr(getattr(np, "dtypes", None), name, None)
     if dtype_class is not None:
       safe.append(dtype_class)
+  if with_legacy_names:
+    for function in (multiarray.scalar, multiarray._reconstruct):
+      legacy = f"numpy.core.multiarray.{function.__name__}"
+      if f"{function.__module__}.{function.__name__}" != legacy:
+        safe.append((function, legacy))
   return safe
 
 
@@ -245,10 +258,16 @@ def _torch_load(path: str, trust_checkpoint: bool):
 
   try:
     safe_globals = getattr(torch.serialization, "safe_globals", None)
-    if safe_globals is not None:
-      with safe_globals(_numpy_safe_globals()):
+    if safe_globals is None:  # PyTorch < 2.5: no allowlist API
+      return torch.load(path, map_location="cpu", weights_only=True)
+    try:
+      allowlist = _numpy_safe_globals()
+      with safe_globals(allowlist):
         return torch.load(path, map_location="cpu", weights_only=True)
-    return torch.load(path, map_location="cpu", weights_only=True)
+    except (TypeError, ValueError, AttributeError):
+      # this PyTorch doesn't take (object, "name") entries
+      with safe_globals(_numpy_safe_globals(with_legacy_names=False)):
+        return torch.load(path, map_location="cpu", weights_only=True)
   except pickle.UnpicklingError as error:
     if not trust_checkpoint:
       raise RuntimeError(

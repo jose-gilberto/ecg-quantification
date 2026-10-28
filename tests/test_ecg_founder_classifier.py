@@ -136,6 +136,29 @@ class TestCheckpointLoading:
     with pytest.raises(ValueError, match="12-lead"):
       _load_pretrained_backbone_state(path)
 
+  def test_numpy1_pickled_metadata_loads_without_trust(self, tmp_path):
+    """Regression: the official release was pickled under numpy 1.x, so its
+    numpy metadata is stored as `numpy.core.multiarray.scalar`, while under
+    numpy 2.x that function reports `numpy._core.multiarray.scalar` --
+    allowlisting it under the new name alone made the real file fail
+    `weights_only=True`. Rebuilds such a file by renaming the globals."""
+    import zipfile
+    network = Net1D(n_classes=150, **_NET1D_ARCHITECTURE)
+    modern = str(tmp_path / "modern.pth")
+    torch.save({"state_dict": network.state_dict(), "val_auroc": np.float64(0.91),
+                "thresholds": np.array([0.5, 0.4])}, modern)
+    legacy = str(tmp_path / "legacy.pth")
+    with zipfile.ZipFile(modern) as src, zipfile.ZipFile(legacy, "w") as dst:
+      for info in src.infolist():
+        data = src.read(info.filename)
+        if info.filename.endswith("data.pkl"):
+          data = data.replace(b"numpy._core.multiarray", b"numpy.core.multiarray")
+        dst.writestr(info, data)
+    with zipfile.ZipFile(legacy) as archive:
+      pickled = archive.read(next(n for n in archive.namelist() if n.endswith("data.pkl")))
+    assert b"numpy.core.multiarray" in pickled and b"numpy._core" not in pickled
+    assert "first_conv.conv.weight" in _load_pretrained_backbone_state(legacy)
+
   def test_arbitrary_pickled_objects_need_trust_checkpoint(self, tmp_path):
     network = Net1D(n_classes=150, **_NET1D_ARCHITECTURE)
     path = str(tmp_path / "pickled.pth")
