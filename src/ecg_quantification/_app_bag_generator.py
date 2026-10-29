@@ -52,6 +52,9 @@ class APPBagGenerator(BaseBagGenerator):
     called, in `np.unique` order.
   sampled_prevalences_ : ndarray of shape (n_bags,)
     Realized positive-class prevalence of each generated bag.
+  sampled_indices_ : ndarray of shape (n_bags, bag_size)
+    Row indices into the `X`/`y` passed to `generate` of the instances in
+    each bag, in bag order.
 
   Notes
   -----
@@ -99,6 +102,7 @@ class APPBagGenerator(BaseBagGenerator):
 
     bag_size = self.bag_size if self.bag_size is not None else len(y)
     self.sampled_prevalences_ = np.zeros(self.n_bags)
+    self.sampled_indices_ = np.zeros((self.n_bags, bag_size), dtype=np.int64)
 
     target_prevalences = rng.uniform(0.0, 1.0, size=self.n_bags)
 
@@ -114,6 +118,7 @@ class APPBagGenerator(BaseBagGenerator):
 
       bag_indices = np.concatenate([pos_idx, neg_idx])
       rng.shuffle(bag_indices)
+      self.sampled_indices_[i] = bag_indices
 
       self.sampled_prevalences_[i] = n_pos_bag / bag_size
 

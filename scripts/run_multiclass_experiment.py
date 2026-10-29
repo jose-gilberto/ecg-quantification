@@ -120,10 +120,9 @@ XLA_PTXAS = configure_xla_ptxas()
 
 import numpy as np
 
+from ecg_quantification._clinical_bag_generator import capp_bag_generator
 from ecg_quantification import (
-  ClinicalPrevalenceBagGenerator,
   CLINICAL_RANGES,
-  ZONE_WEIGHTS,
   ZoneCrossingError,
   ExperimentCheckpoint,
   default_base_classifiers,
@@ -669,14 +668,7 @@ def main() -> None:
     # with a fixed random_state, ClinicalPrevalenceBagGenerator produces
     # byte-identical bags every time, so this stays consistent with
     # whatever was already evaluated and checkpointed for this bag_size
-    generator = ClinicalPrevalenceBagGenerator(
-      clinical_ranges=CLINICAL_RANGES,
-      zone_weights=ZONE_WEIGHTS,
-      n_bags=args.n_bags,
-      bag_size=bag_size,
-      base_label='N',
-      random_state=args.random_state,
-    )
+    generator = capp_bag_generator(args.n_bags, bag_size, args.random_state)
     bags = generator.to_list(X_test, y_test)
     true_prevalences = generator.sampled_prevalences_
 

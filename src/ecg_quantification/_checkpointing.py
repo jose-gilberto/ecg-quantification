@@ -56,7 +56,10 @@ class ExperimentCheckpoint:
   ----------
   checkpoint_dir : str
     Directory the checkpoint state is persisted to (manifest, fitted
-    quantifiers, per-unit result fragments). Created if missing.
+    quantifiers, per-unit result fragments). Created if missing. The
+    manifest stores paths relative to this directory, so it can be moved
+    or copied elsewhere (another machine included) and still load;
+    manifests written by older versions are resolved too.
 
   Attributes
   ----------
@@ -145,6 +148,31 @@ class ExperimentCheckpoint:
 
   # ---------- manifest plumbing ----------
 
+  def _stored(self, path: str) -> str:
+    """What the manifest records for a file: its path relative to the
+    checkpoint directory, so the whole directory can be moved or copied
+    to another machine and still load."""
+    return os.path.relpath(path, self.checkpoint_dir)
+
+  def _resolve(self, stored: str, subdir: str) -> str:
+    """Finds a manifest entry's file. Tries, in order: relative to the
+    checkpoint directory (current format); the path as written (older
+    manifests stored it relative to the working directory of the run, or
+    absolute); the file name inside `subdir` of this checkpoint directory
+    (older manifests, directory moved since)."""
+    candidates = []
+    if not os.path.isabs(stored):
+      candidates.append(os.path.join(self.checkpoint_dir, stored))
+    candidates.append(stored)
+    candidates.append(os.path.join(subdir, os.path.basename(stored)))
+    for candidate in candidates:
+      if os.path.exists(candidate):
+        return candidate
+    raise FileNotFoundError(
+      f"Checkpoint file {os.path.basename(stored)!r} not found under {self.checkpoint_dir} "
+      f"(manifest entry: {stored!r})."
+    )
+
   def _load_manifest(self) -> dict:
     if os.path.exists(self.manifest_path):
       with open(self.manifest_path) as f:
@@ -194,7 +222,7 @@ class ExperimentCheckpoint:
     joblib.dump(obj, tmp_path)
     os.replace(tmp_path, path)
 
-    self.manifest['artifacts'][key] = {'path': path}
+    self.manifest['artifacts'][key] = {'path': self._stored(path)}
     self._save_manifest()
 
   def load_artifact(self, key: str) -> Any:
@@ -207,7 +235,7 @@ class ExperimentCheckpoint:
     """
     if not self.has_artifact(key):
       raise KeyError(f"No cached artifact found for '{key}'.")
-    return joblib.load(self.manifest['artifacts'][key]['path'])
+    return joblib.load(self._resolve(self.manifest['artifacts'][key]['path'], self.models_dir))
 
   # ---------- fit stage ----------
 
@@ -238,7 +266,7 @@ class ExperimentCheckpoint:
     """
     if not self.is_fitted(name):
       raise KeyError(f"No fitted checkpoint found for '{name}'.")
-    return joblib.load(self.manifest['fitted'][name]['path'])
+    return joblib.load(self._resolve(self.manifest['fitted'][name]['path'], self.models_dir))
 
   def save_fitted(self, name: str, quantifier) -> None:
     """Persists an already-fitted `quantifier` under `name`, and marks
@@ -258,7 +286,7 @@ class ExperimentCheckpoint:
     joblib.dump(quantifier, tmp_path)
     os.replace(tmp_path, path)
 
-    self.manifest['fitted'][name] = {'path': path}
+    self.manifest['fitted'][name] = {'path': self._stored(path)}
     self._save_manifest()
 
   # ---------- evaluation stage ----------
@@ -291,7 +319,7 @@ class ExperimentCheckpoint:
     pd.DataFrame(rows).to_csv(tmp_path, index=False)
     os.replace(tmp_path, path)
 
-    self.manifest['evaluated'][key] = {'path': path, 'name': name, 'bag_size': bag_size}
+    self.manifest['evaluated'][key] = {'path': self._stored(path), 'name': name, 'bag_size': bag_size}
     self._save_manifest()
 
   def load_results(self) -> pd.DataFrame:
@@ -304,7 +332,8 @@ class ExperimentCheckpoint:
       All checkpointed evaluation rows, concatenated. Empty DataFrame
       if nothing has been evaluated yet.
     """
-    fragments = [pd.read_csv(entry['path']) for entry in self.manifest['evaluated'].values()]
+    fragments = [pd.read_csv(self._resolve(entry['path'], self.results_dir))
+                 for entry in self.manifest['evaluated'].values()]
     if not fragments:
       return pd.DataFrame()
     return pd.concat(fragments, ignore_index=True)

@@ -197,20 +197,32 @@ class TestProgressReporting:
     clear_fit_cache("stats-scope")
     assert fit_cache_stats("stats-scope") == {'trainings': 0, 'hits': 0}
 
-  def test_trainings_logged_at_info_hits_at_debug(self, caplog, monkeypatch):
-    # run_multiclass_experiment.py turns propagation off for its own
-    # printing; make sure caplog (a root handler) still sees the records
-    # even if that script already ran earlier in this test session
-    monkeypatch.setattr(logging.getLogger("ecg_quantification"), "propagate", True)
-    X, y = _make_data(seed=13)
-    factory = cached_classifier_factory(_counting_factory("logs"), cache_id="log-scope")
+  def test_trainings_logged_at_info_hits_at_debug(self):
+    # a handler on the logger itself, not caplog: whether records reach the
+    # root logger depends on what ran earlier in the session (scripts turn
+    # propagation off and pytest then attaches its own capture handlers)
+    records = []
 
-    with caplog.at_level(logging.DEBUG, logger="ecg_quantification.fit_cache"):
+    class _Collect(logging.Handler):
+      def emit(self, record):
+        records.append(record)
+
+    logger = logging.getLogger("ecg_quantification.fit_cache")
+    handler = _Collect(level=logging.DEBUG)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+      X, y = _make_data(seed=13)
+      factory = cached_classifier_factory(_counting_factory("logs"), cache_id="log-scope")
       factory().fit(X, y)
       factory().fit(X, y)
+    finally:
+      logger.removeHandler(handler)
+      logger.setLevel(previous_level)
 
-    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    info = [r.getMessage() for r in records if r.levelno == logging.INFO]
+    debug = [r.getMessage() for r in records if r.levelno == logging.DEBUG]
     assert len(info) == 2
     assert info[0].startswith(f"training #1 started: {len(y)} samples")
     assert info[1].startswith("training #1 done in")

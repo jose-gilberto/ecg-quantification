@@ -9,6 +9,7 @@ loading, validation, preprocessing, training and pickling code paths.
 Requires PyTorch (the `ecgfounder` extra); skipped otherwise.
 """
 import argparse
+import shutil
 import logging
 import os
 
@@ -361,3 +362,40 @@ class TestFinetune:
     classifier.fit_params = {"epochs": 3}
     with pytest.raises(TypeError, match="fit_params"):
       classifier.fit(X, y)
+
+
+class TestPortability:
+  """Fitted ECGFounder models pickled on one machine, used on another
+  (`scripts/export_bundle.py`): the pretrained path they stored does not
+  exist there, and there may be no GPU."""
+
+  def test_moved_pretrained_weights_fall_back_to_the_environment(self, fake_checkpoint, tmp_path, monkeypatch):
+    X, y = _make_data()
+    original = str(tmp_path / "1_lead_ECGFounder.pth")
+    shutil.copy(fake_checkpoint, original)
+    classifier = ECGFounderClassifier(checkpoint_path=original, device="cpu", batch_size=32).fit(X, y)
+    expected = classifier.predict_proba(X)
+    path = str(tmp_path / "probe.joblib")
+    joblib.dump(classifier, path)
+
+    os.remove(original)  # "another machine": the stored path is gone
+    _ecg_founder._PRETRAINED_STATES.clear()
+    _ecg_founder._FROZEN_BACKBONES.clear()
+    resolve_ecg_founder_checkpoint.cache_clear()
+    monkeypatch.setenv("ECGFOUNDER_CHECKPOINT", fake_checkpoint)
+    with pytest.warns(UserWarning, match="not found"):
+      reloaded = joblib.load(path).predict_proba(X)
+    np.testing.assert_allclose(reloaded, expected, atol=1e-5)
+    resolve_ecg_founder_checkpoint.cache_clear()
+
+  def test_device_override_for_models_fitted_on_a_gpu(self, fake_checkpoint, monkeypatch):
+    if torch.cuda.is_available():
+      pytest.skip("a CUDA GPU is visible here")
+    X, y = _make_data()
+    reference = ECGFounderClassifier(checkpoint_path=fake_checkpoint, device="cpu", batch_size=32).fit(X, y)
+    model = reference.model_
+    model.device = "cuda"  # as pickled on the GPU machine
+    with pytest.raises(RuntimeError, match="no GPU is visible"):
+      model.predict_proba(X)
+    monkeypatch.setenv("ECGFOUNDER_DEVICE", "cpu")
+    np.testing.assert_allclose(model.predict_proba(X), reference.predict_proba(X), atol=1e-6)

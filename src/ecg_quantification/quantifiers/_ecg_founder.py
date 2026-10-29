@@ -88,6 +88,7 @@ import os
 import pickle
 import sys
 import time
+import warnings
 
 import numpy as np
 from quack.utils.wrappers import SklearnClassifierWrapper
@@ -468,13 +469,45 @@ class _ECGFounderModel:
 
   # -- helpers ------------------------------------------------------------
 
+  def _device(self) -> str:
+    """`device`, unless the `ECGFOUNDER_DEVICE` environment variable says
+    otherwise -- e.g. `cpu` to use models fitted on a GPU machine on one
+    without a GPU."""
+    return os.environ.get("ECGFOUNDER_DEVICE", self.device)
+
   def _torch_device(self):
     torch = _import_torch()
-    configure_torch_device(self.device)
-    return torch.device(self.device)
+    configure_torch_device(self._device())
+    return torch.device(self._device())
 
   def _pretrained_path(self) -> str:
+    """The pretrained weights. A fitted model pickled on another machine
+    stores that machine's path; when it doesn't exist here, fall back to
+    `ECGFOUNDER_CHECKPOINT` or the Hugging Face download (same file)."""
+    if self.checkpoint_path and not os.path.isfile(self.checkpoint_path):
+      warnings.warn(
+        f"ECGFounder weights not found at {self.checkpoint_path} (fitted elsewhere?); using "
+        f"$ECGFOUNDER_CHECKPOINT or the Hugging Face copy of {HF_SINGLE_LEAD_FILENAME} instead."
+      )
+      return resolve_ecg_founder_checkpoint(None)
     return resolve_ecg_founder_checkpoint(self.checkpoint_path)
+
+  def _weights_path(self) -> str:
+    """`final.pt` of a fine-tuned model; if the training directory was
+    moved (e.g. copied to another machine), it is looked up by name under
+    `ECGFOUNDER_TRAININGS_DIR`."""
+    path = self.weights_path_
+    if os.path.isfile(path):
+      return path
+    moved_root = os.environ.get("ECGFOUNDER_TRAININGS_DIR")
+    if moved_root:
+      moved = os.path.join(moved_root, os.path.basename(os.path.dirname(path)), os.path.basename(path))
+      if os.path.isfile(moved):
+        return moved
+    raise FileNotFoundError(
+      f"Fine-tuned ECGFounder weights not found at {path} (was the training checkpoint "
+      f"directory moved? Point ECGFOUNDER_TRAININGS_DIR at its new location)."
+    )
 
   def _seed(self) -> int:
     return 0 if self.random_state is None else int(self.random_state)
@@ -483,7 +516,7 @@ class _ECGFounderModel:
     """The shared, frozen pretrained network on this model's device."""
     torch = _import_torch()
     path = self._pretrained_path()
-    key = (path, self.device)
+    key = (path, self._device())
     if key not in _FROZEN_BACKBONES:
       network = _build_network(1, _load_pretrained_backbone_state(path, self.trust_checkpoint))
       network.return_features = True
@@ -491,7 +524,7 @@ class _ECGFounderModel:
       for parameter in network.parameters():
         parameter.requires_grad_(False)
       _FROZEN_BACKBONES[key] = network.to(self._torch_device())
-    return _FROZEN_BACKBONES[key], torch.device(self.device)
+    return _FROZEN_BACKBONES[key], torch.device(self._device())
 
   def _batched_forward(self, network, X_input: np.ndarray, device, features: bool) -> np.ndarray:
     torch = _import_torch()
@@ -520,12 +553,7 @@ class _ECGFounderModel:
       if self.__dict__.get("_weights") is not None:
         weights = self._weights
       elif self.__dict__.get("weights_path_"):
-        if not os.path.isfile(self.weights_path_):
-          raise FileNotFoundError(
-            f"Fine-tuned ECGFounder weights not found at {self.weights_path_} (was the "
-            f"training checkpoint directory moved or deleted?)."
-          )
-        weights = torch.load(self.weights_path_, map_location="cpu", weights_only=True)["model"]
+        weights = torch.load(self._weights_path(), map_location="cpu", weights_only=True)["model"]
       else:
         raise RuntimeError("This ECGFounder model has no fitted weights.")
       from ecg_quantification.quantifiers._net1d import Net1D

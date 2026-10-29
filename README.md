@@ -157,3 +157,25 @@ per-class ECE), reliability diagrams and a summary figure under
 interruption) never refits a model. The `cv` protocol refits each
 classical classifier 5 times; SVM is by far the slowest -- leave it out
 with `--cv-classifiers LR GB RF` if needed.
+
+### Sharing a finished experiment (instance-level analysis elsewhere)
+
+`scripts/export_bundle.py` packs one or more `run_multiclass_experiment.py`
+runs into a self-contained folder (optionally `.tar.gz`) that works on
+another machine:
+
+```bash
+python scripts/export_bundle.py \
+    --splits-path data/processed/splits_multiclass.npz \
+    --experiment-dir results/multiclass_capp results/multiclass_capp_ecgfounder \
+    --calibration-dir results/calibration \
+    --output-dir export/ecg_bundle --archive
+```
+
+It contains the fitted quantifiers (checkpoints, with portable paths), the
+beat indices of every bag (regenerated with the run's seed and checked
+against its recorded true prevalences), per-beat classifier outputs (test
+and train), the per-bag results and the package versions used. Read it with
+`ecg_quantification.bundle.ExportedBundle` -- the bundle's own README.md
+has the snippets. Checkpoint directories themselves can now also be moved
+or copied: their manifests resolve paths relative to the directory.

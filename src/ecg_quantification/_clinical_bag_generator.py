@@ -48,6 +48,11 @@ class ClinicalPrevalenceBagGenerator(BaseBagGenerator):
   sampled_prevalences_ : ndarray of shape (n_bags, n_classes)
     Realized prevalence of each class per generated bag, aligned to
     `classes_` (sorted ascending, standard `np.unique` order).
+  sampled_indices_ : ndarray of shape (n_bags, bag_size)
+    Row indices into the `X`/`y` passed to `generate` of the instances in
+    each bag, in bag order (repeats possible when sampling with
+    replacement). Filled bag by bag as `generate` yields; complete after
+    `to_list`. Lets per-instance analyses map every bag back to its beats.
   sampled_zones_ : dict[str, ndarray of shape (n_bags,)]
     For each label in `clinical_ranges`, the index of the risk zone
     sampled for each bag (useful for stratified downstream analysis).
@@ -179,6 +184,7 @@ class ClinicalPrevalenceBagGenerator(BaseBagGenerator):
     bag_size = self.bag_size if self.bag_size is not None else len(y)
     self.sampled_prevalences_ = np.zeros((self.n_bags, n_classes))
     self.sampled_zones_ = {label: np.zeros(self.n_bags, dtype=int) for label in self.clinical_ranges}
+    self.sampled_indices_ = np.zeros((self.n_bags, bag_size), dtype=np.int64)
 
     for i in range(self.n_bags):
       prevalence_vec, zones = self._sample_bag_prevalence(rng)
@@ -203,5 +209,22 @@ class ClinicalPrevalenceBagGenerator(BaseBagGenerator):
 
       bag_indices = np.concatenate(bag_indices)
       rng.shuffle(bag_indices)
+      self.sampled_indices_[i] = bag_indices
 
       yield X[bag_indices], y[bag_indices]
+
+
+def capp_bag_generator(n_bags: int, bag_size: int, random_state=None) -> ClinicalPrevalenceBagGenerator:
+  """The C-APP bag generator exactly as `scripts/run_multiclass_experiment.py`
+  configures it (project `CLINICAL_RANGES`/`ZONE_WEIGHTS`, base label 'N').
+  Shared so other tools (e.g. `scripts/export_bundle.py`) regenerate the
+  very same bags from a run's `n_bags`/`bag_size`/`random_state`."""
+  from ecg_quantification._ranges import CLINICAL_RANGES, ZONE_WEIGHTS
+  return ClinicalPrevalenceBagGenerator(
+    clinical_ranges=CLINICAL_RANGES,
+    zone_weights=ZONE_WEIGHTS,
+    n_bags=n_bags,
+    bag_size=bag_size,
+    base_label='N',
+    random_state=random_state,
+  )
