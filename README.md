@@ -120,3 +120,40 @@ pip install -e ".[test,deep]"
 This will move forward on its own as TensorFlow ships stable 3.14
 support; no action needed here once that happens.
 
+
+### Calibration study (Fase 5)
+
+`scripts/calibration_study.py` measures how well calibrated each base
+classifier's probabilities are on the held-out patients -- what
+probability-based quantifiers (PCC, PACC, EMQ) depend on -- before and
+after sklearn's calibrators (`CalibratedClassifierCV`: sigmoid, isotonic,
+temperature). All numbers are computed on the same beats (the whole test
+pool):
+
+- **uncalibrated**: the base classifier trained on the full training split,
+  taken from a `run_multiclass_experiment.py` checkpoint (its fitted
+  `<classifier>-CC`) -- never retrained for LITETime/ECGFounder.
+- **post-hoc**: calibration of those precomputed outputs, cross-fitted over
+  the test pool by patient (each beat is calibrated by a map fit on other
+  patients). Applies to every classifier, deep ones included.
+- **cv** (classical classifiers): `CalibratedClassifierCV(..., cv=5)` on the
+  training split, folds grouped by patient.
+
+```bash
+python scripts/calibration_study.py \
+    --splits-path data/processed/splits_multiclass.npz \
+    --output-dir results/calibration \
+    --classifiers LR SVM GB RF LITETime ECGFounder \
+    --experiment-checkpoint results/multiclass_capp/_checkpoint \
+                            results/multiclass_capp_ecgfounder/_checkpoint \
+    --random-state 0 2>&1 | tee calibration.log
+```
+
+Writes `calibration_metrics.csv` (accuracy, Brier score, log loss,
+top-label ECE with equal-width and equal-mass bins, classwise ECE and
+per-class ECE), reliability diagrams and a summary figure under
+`figures/` (PDF + PNG), and caches every classifier output under
+`probabilities/`, so re-running (other bins, methods, or after an
+interruption) never refits a model. The `cv` protocol refits each
+classical classifier 5 times; SVM is by far the slowest -- leave it out
+with `--cv-classifiers LR GB RF` if needed.

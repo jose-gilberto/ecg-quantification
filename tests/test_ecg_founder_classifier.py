@@ -283,6 +283,9 @@ class TestFinetune:
     np.testing.assert_allclose(joblib.load(path).predict_proba(X), classifier.predict_proba(X), atol=1e-5)
 
     # a restarted run (fresh model, same data/config) loads instead of training
+    # (clear first: if a script attached the package's INFO logging earlier
+    # in this session, the first fit's records were captured too)
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="ecg_quantification.ecg_founder"):
       again = self._classifier(fake_checkpoint, training_checkpoint_root=root).fit(X, y)
     messages = [r.getMessage() for r in caplog.records]
@@ -313,6 +316,7 @@ class TestFinetune:
     assert os.listdir(os.path.join(root, directory)) == ["resume.pt"]
     monkeypatch.setattr(torch.optim.Adam, "step", original_step)
 
+    caplog.clear()  # only the resumed run's records (see the test above)
     with caplog.at_level(logging.INFO, logger="ecg_quantification.ecg_founder"):
       self._classifier(fake_checkpoint, training_checkpoint_root=root).fit(X, y)
     messages = [r.getMessage() for r in caplog.records]
